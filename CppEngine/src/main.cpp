@@ -6,7 +6,8 @@ using namespace std;
 
 int main(){
 
-    // cout << "main.cpp is running...";
+    // echo '{"hello":"world"}' | ./build/cf_engine.exe
+    //test cin input ^^^
 
     std::string raw((std::istreambuf_iterator<char>(std::cin)),
                      std::istreambuf_iterator<char>());
