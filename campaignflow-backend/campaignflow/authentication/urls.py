@@ -14,5 +14,5 @@ urlpatterns = [
     path("register/", RegisterApi.as_view(), name="auth-register"),
     path("login/", LoginApi.as_view(), name="auth-login"),
     path("logout/", LogoutApi.as_view(), name="auth-logout"),
-    path("check/", CurrentUserApi.as_view(), name="auth-check"),
+    path("me/", CurrentUserApi.as_view(), name="auth-me"),
 ]
