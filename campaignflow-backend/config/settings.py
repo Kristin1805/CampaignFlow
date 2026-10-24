@@ -11,6 +11,8 @@ https://docs.djangoproject.com/en/6.1/ref/settings/
 """
 import os
 from pathlib import Path
+
+from django.core.exceptions import ImproperlyConfigured
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -91,10 +93,39 @@ WSGI_APPLICATION = 'config.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/6.1/ref/settings/#databases
 
+# Database configuration
+
+required_db_variables = (
+    "DB_NAME",
+    "DB_USER",
+    "DB_PASSWORD",
+    "DB_HOST",
+    "DB_PORT",
+)
+
+missing_db_variables = [
+    variable
+    for variable in required_db_variables
+    if not os.getenv(variable)
+]
+
+if missing_db_variables:
+    raise ImproperlyConfigured(
+        "Missing PostgreSQL environment variables: "
+        + ", ".join(missing_db_variables)
+    )
+
 DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+    "default": {
+        "ENGINE": "django.db.backends.postgresql",
+        "NAME": os.environ["DB_NAME"],
+        "USER": os.environ["DB_USER"],
+        "PASSWORD": os.environ["DB_PASSWORD"],
+        "HOST": os.environ["DB_HOST"],
+        "PORT": os.environ["DB_PORT"],
+        "OPTIONS": {
+            "connect_timeout": 5,
+        },
     }
 }
 
