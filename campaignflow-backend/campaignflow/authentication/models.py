@@ -1,3 +1,4 @@
+import uuid
 
 from django.contrib.auth.base_user import BaseUserManager
 from django.contrib.auth.models import AbstractUser
@@ -29,7 +30,7 @@ class UserManager(BaseUserManager):
             raise ValueError("Password is required.")
 
         user = self.model(
-            email=self.normalize_email(email),
+            email=self.normalize_email(email.strip()),
             nickname=nickname,
             first_name=first_name,
             last_name=last_name,
@@ -37,6 +38,7 @@ class UserManager(BaseUserManager):
         )
 
         user.set_password(password)
+        user.full_clean()
         user.save(using=self._db)
 
         return user
@@ -71,16 +73,29 @@ class UserManager(BaseUserManager):
 
 
 class User(AbstractUser):
+    id = models.UUIDField(
+        primary_key=True,
+        default=uuid.uuid4,
+        editable=False,
+    )
+
     username = None
 
-    email = models.EmailField(unique=True)
-    nickname = models.CharField(max_length=50, unique=True)
+    email = models.EmailField(unique=True, )
 
-    first_name = models.CharField(max_length=150)
-    last_name = models.CharField(max_length=150)
+    nickname = models.CharField(max_length=50, unique=True,)
+
+    first_name = models.CharField(max_length=150,)
+
+    last_name = models.CharField(max_length=150,)
 
     USERNAME_FIELD = "email"
-    REQUIRED_FIELDS = ["nickname", "first_name", "last_name"]
+
+    REQUIRED_FIELDS = [
+        "nickname",
+        "first_name",
+        "last_name",
+    ]
 
     objects = UserManager()
 
