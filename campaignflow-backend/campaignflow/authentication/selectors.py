@@ -15,4 +15,4 @@ class UserSelector:
 
     @staticmethod
     def get_by_email(email: str) -> User | None:
-        return User.objects.filter(email=email.strip().lower()).first()
+        return User.objects.filter(email__iexact=email.strip()).first()
