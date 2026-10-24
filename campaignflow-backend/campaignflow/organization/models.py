@@ -1,32 +1,45 @@
-
 import uuid
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from django.conf import settings
-from django.core.exceptions import ValidationError
-from django.core.validators import MaxValueValidator, MinValueValidator
+from django.core.validators import MinValueValidator, MaxValueValidator
 from django.db import models
 
+from campaignflow.organization.validators import validate_timezone, validate_working_days
 
 def default_working_days():
     return [0, 1, 2, 3, 4]
 
+class WorkspaceMember(models.Model):
+    class Role(models.TextChoices):
+        ADMIN = "admin", "Admin"
+        MANAGER = "manager", "Manager"
+        MEMBER = "member", "Member"
+        GUEST = "guest", "Guest"
 
-def validate_working_days(value):
-    if (
-        not isinstance(value, list)
-        or not value
-        or any(type(day) is not int or day not in range(7) for day in value)
-        or len(value) != len(set(value))
-    ):
-        raise ValidationError( "Working days must be unique integers between 0 and 6.")
+    id = models.UUIDField(
+        primary_key=True,
+        default=uuid.uuid4,
+        editable=False,
+    )
 
+    workspace = models.ForeignKey("organization.Workspace",on_delete=models.CASCADE,related_name="members",)
 
-def validate_timezone(value):
-    try:
-        ZoneInfo(value)
-    except (ZoneInfoNotFoundError, ValueError, TypeError):
-        raise ValidationError("Invalid timezone.")
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="workspace_memberships",)
+
+    role = models.CharField(max_length=20, choices=Role.choices, default=Role.MEMBER, )
+
+    created_at = models.DateTimeField(auto_now_add=True,)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["workspace", "user"],
+                name="unique_workspace_user_membership",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.user.email} - {self.workspace.name} ({self.role})"
 
 
 class Workspace(models.Model):
