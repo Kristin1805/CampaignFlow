@@ -17,23 +17,26 @@ class UserManager(BaseUserManager):
         password=None,
         **extra_fields,
     ):
-        if not email:
+        if not email or not email.strip():
             raise ValueError("Email is required.")
 
-        if not nickname:
+        if not nickname or not nickname.strip():
             raise ValueError("Nickname is required.")
 
-        if not first_name or not last_name:
-            raise ValueError("First and last name are required.")
+        if not first_name or not first_name.strip():
+            raise ValueError("First name is required.")
+
+        if not last_name or not last_name.strip():
+            raise ValueError("Last name is required.")
 
         if not password:
             raise ValueError("Password is required.")
 
         user = self.model(
-            email=self.normalize_email(email.strip()),
-            nickname=nickname,
-            first_name=first_name,
-            last_name=last_name,
+            email=self.normalize_email(email.strip()).lower(),
+            nickname=nickname.strip(),
+            first_name=first_name.strip(),
+            last_name=last_name.strip(),
             **extra_fields,
         )
 
