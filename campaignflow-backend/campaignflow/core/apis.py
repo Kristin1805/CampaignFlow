@@ -1,11 +1,7 @@
-from rest_framework.authentication import SessionAuthentication
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.views import APIView
 
-
-class CampaignFlowSessionAuthentication(SessionAuthentication):
-    def authenticate_header(self, request):
-        return "Session"
+from .authentication import CampaignFlowSessionAuthentication
 
 
 class PublicApi(APIView):

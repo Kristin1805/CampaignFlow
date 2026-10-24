@@ -6,7 +6,7 @@ class UserSelector:
     @staticmethod
     def get_user_data(user: User) -> dict:
         return {
-            "id": user.id,
+            "id": str(user.id),
             "email": user.email,
             "nickname": user.nickname,
             "first_name": user.first_name,

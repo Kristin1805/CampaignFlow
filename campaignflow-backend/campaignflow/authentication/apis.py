@@ -87,7 +87,54 @@ class RegisterApi(PublicApi):
 
 
 @method_decorator(csrf_protect, name="dispatch")
+@method_decorator(
+    ratelimit(
+        key="ip",
+        rate="5/m",
+        method="POST",
+        block=False,
+    ),
+    name="dispatch",
+)
 class LoginApi(PublicApi):
+
+    class InputSerializer(serializers.Serializer):
+        email = serializers.EmailField()
+        password = serializers.CharField(
+            write_only=True,
+            trim_whitespace=False,
+        )
+
+    def post(self, request):
+        if getattr(request._request, "limited", False):
+            return Response(
+                {
+                    "detail": "Too many login attempts. Please try again later."
+                },
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+
+        serializer = self.InputSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        user = user_login(
+            request=request,
+            **serializer.validated_data,
+        )
+
+        if user is None:
+            return Response(
+                {"detail": "Invalid email or password."},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+
+        response = Response(
+            UserSelector.get_user_data(user),
+            status=status.HTTP_200_OK,
+        )
+        response["Cache-Control"] = "no-store"
+
+        return response
 
     class InputSerializer(serializers.Serializer):
         email = serializers.EmailField()
