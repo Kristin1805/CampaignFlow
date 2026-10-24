@@ -2,6 +2,7 @@
 from django.urls import path
 
 from .apis import (
+    CsrfTokenApi,
     RegisterApi,
     LoginApi,
     LogoutApi,
@@ -9,8 +10,9 @@ from .apis import (
 )
 
 urlpatterns = [
-    path("register/", RegisterApi.as_view(), name="register"),
-    path("login/", LoginApi.as_view(), name="login"),
-    path("logout/", LogoutApi.as_view(), name="logout"),
-    path("me/", CurrentUserApi.as_view(), name="current-user"),
+    path("csrf/", CsrfTokenApi.as_view(), name="auth-csrf"),
+    path("register/", RegisterApi.as_view(), name="auth-register"),
+    path("login/", LoginApi.as_view(), name="auth-login"),
+    path("logout/", LogoutApi.as_view(), name="auth-logout"),
+    path("check/", CurrentUserApi.as_view(), name="auth-check"),
 ]

@@ -2,19 +2,35 @@
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import IntegrityError
+from django.middleware.csrf import get_token
+from django.utils.decorators import method_decorator
+from django.views.decorators.csrf import csrf_protect, ensure_csrf_cookie
+from django_ratelimit.decorators import ratelimit
+
 from rest_framework import serializers, status
-from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
-from rest_framework.views import APIView
+
+from campaignflow.core.apis import PublicApi, PrivateApi
 
 from .models import User
 from .selectors import UserSelector
 from .services import user_create, user_login, user_logout
 
 
-class RegisterApi(APIView):
-    permission_classes = [AllowAny]
-    authentication_classes = []
+@method_decorator(ensure_csrf_cookie, name="dispatch")
+class CsrfTokenApi(PublicApi):
+    def get(self, request):
+        response = Response({
+            "csrf_token": get_token(request),
+        })
+
+        response["Cache-Control"] = "no-store"
+
+        return response
+
+
+@method_decorator(csrf_protect, name="dispatch")
+class RegisterApi(PublicApi):
 
     class InputSerializer(serializers.Serializer):
         email = serializers.EmailField()
@@ -33,25 +49,8 @@ class RegisterApi(APIView):
         def validate_nickname(self, value):
             value = value.strip()
 
-            if not value:
-                raise serializers.ValidationError("Nickname is required.")
-
-            if User.objects.filter(nickname=value).exists():
+            if User.objects.filter(nickname__iexact=value).exists():
                 raise serializers.ValidationError("Nickname already taken.")
-            return value
-
-        def validate_first_name(self, value):
-            value = value.strip()
-
-            if not value:
-                raise serializers.ValidationError("First name is required.")
-            return value
-
-        def validate_last_name(self, value):
-            value = value.strip()
-
-            if not value:
-                raise serializers.ValidationError("Last name is required.")
 
             return value
 
@@ -80,24 +79,37 @@ class RegisterApi(APIView):
             user = user_create(**serializer.validated_data)
         except IntegrityError:
             return Response(
-                {
-                    "detail": "Email or nickname already exists."
-                },
+                {"detail": "Email or nickname already exists."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
         return Response(UserSelector.get_user_data(user), status=status.HTTP_201_CREATED,)
 
 
-class LoginApi(APIView):
-    permission_classes = [AllowAny]
-    authentication_classes = []
+@method_decorator(csrf_protect, name="dispatch")
+class LoginApi(PublicApi):
 
     class InputSerializer(serializers.Serializer):
         email = serializers.EmailField()
-        password = serializers.CharField(trim_whitespace=False,)
+        password = serializers.CharField(write_only=True, trim_whitespace=False,)
 
+    @method_decorator(
+        ratelimit(
+            key="ip",
+            rate="5/m",
+            method="POST",
+            block=False,
+        )
+    )
     def post(self, request):
+        if getattr(request, "limited", False):
+            return Response(
+                {
+                    "detail": "Too many login attempts. Please try again later."
+                },
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+
         serializer = self.InputSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
@@ -114,20 +126,24 @@ class LoginApi(APIView):
                 status=status.HTTP_401_UNAUTHORIZED,
             )
 
-        return Response(UserSelector.get_user_data(user),status=status.HTTP_200_OK, )
+        response = Response(UserSelector.get_user_data(user),status=status.HTTP_200_OK,)
+
+        response["Cache-Control"] = "no-store"
+
+        return response
 
 
-class LogoutApi(APIView):
-    permission_classes = [IsAuthenticated]
-
+class LogoutApi(PrivateApi):
     def post(self, request):
         user_logout(request=request)
 
         return Response(status=status.HTTP_204_NO_CONTENT,)
 
 
-class CurrentUserApi(APIView):
-    permission_classes = [IsAuthenticated]
-
+class CurrentUserApi(PrivateApi):
     def get(self, request):
-        return Response(UserSelector.get_user_data(request.user), status=status.HTTP_200_OK,)
+        response = Response(UserSelector.get_user_data(request.user), status=status.HTTP_200_OK,)
+
+        response["Cache-Control"] = "no-store"
+
+        return response
