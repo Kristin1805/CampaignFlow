@@ -26,6 +26,19 @@ Creates the production files in `dist/`.
 `npm run preview`
 Runs the production build locally for testing.
 
+## Production: history fallback
+
+The app uses client-side routing (History API).
+If a user opens a URL like `/campaigns` directly or refreshes the page,
+the server looks for a file at that path, doesn't find one,
+and returns its own 404 instead of loading the app.
+
+**Production server requirement:** for any path that is not an existing
+static file and does not start with `/api/`, the server must return
+`index.html`.
+
+In development, Vite handles this automatically.
+
 ## Environment variables
 - Copy `.env.example` to `.env` for local settings.
 - Do not commit `.env` (it is ignored by Git).
