@@ -85,3 +85,38 @@ class Workspace(models.Model):
 
     def __str__(self):
         return self.name
+
+
+
+class Skill(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False,)
+
+    code = models.SlugField(max_length=100, unique=True,)
+
+    name = models.CharField(max_length=150,)
+
+    class Meta:
+        ordering = ["name"]
+
+    def __str__(self):
+        return self.name
+
+
+class WorkspaceMemberSkill(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False,)
+
+    workspace_member = models.ForeignKey("organization.WorkspaceMember", on_delete=models.CASCADE, related_name="member_skills",)
+
+    skill = models.ForeignKey("organization.Skill", on_delete=models.PROTECT, related_name="member_skills",)
+
+    created_at = models.DateTimeField(auto_now_add=True,)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["workspace_member", "skill"],
+                name="unique_workspace_member_skill",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.workspace_member.user.email} - {self.skill.name}"
