@@ -1,1 +1,23 @@
+:root {
+  /* Primary */
+  --color-primary: #6e47fb;       /* buttons, active links, tabs */
+  --color-primary-soft: #efeaff;  /* bg-color for sidebar active link */
 
+  /*Typography*/
+  --font-family-base: 'Inter', system-ui, sans-serif;
+
+  /* Text */
+  --color-text: #070719;
+  --color-text-muted: #6b6f80;
+
+  /* Bg-colors and frames */
+  --color-background: #f7f7fb;    /* page bg-color */
+  --color-surface: #ffffff;       /* maps, buttons, tables */
+  --color-border: #e4e4ec;
+
+  /* Categories (Timeline labels) */
+  --color-category-strategy: #ede9fe;   /* purple*/
+  --color-category-copy: #fef3c7;       /* yellow */
+  --color-category-video: #dcfce7;      /* green */
+  --color-category-publishing: #dbeafe; /* blue */
+}
