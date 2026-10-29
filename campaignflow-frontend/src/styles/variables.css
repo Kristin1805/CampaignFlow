@@ -1,23 +1,57 @@
 :root {
   /* Primary */
-  --color-primary: #6e47fb;       /* buttons, active links, tabs */
-  --color-primary-soft: #efeaff;  /* bg-color for sidebar active link */
-
-  /*Typography*/
-  --font-family-base: 'Inter', system-ui, sans-serif;
+  --color-primary: #6e47fb; /* buttons, active links, tabs */
+  --color-primary-soft: #efeaff; /* bg-color for sidebar active link */
 
   /* Text */
   --color-text: #070719;
   --color-text-muted: #6b6f80;
 
   /* Bg-colors and frames */
-  --color-background: #f7f7fb;    /* page bg-color */
-  --color-surface: #ffffff;       /* maps, buttons, tables */
+  --color-background: #f7f7fb; /* page bg-color */
+  --color-surface: #ffffff; /* cards, buttons, tables */
   --color-border: #e4e4ec;
 
   /* Categories (Timeline labels) */
-  --color-category-strategy: #ede9fe;   /* purple*/
-  --color-category-copy: #fef3c7;       /* yellow */
-  --color-category-video: #dcfce7;      /* green */
+  --color-category-strategy: #ede9fe; /* purple*/
+  --color-category-copy: #fef3c7; /* yellow */
+  --color-category-video: #dcfce7; /* green */
   --color-category-publishing: #dbeafe; /* blue */
+
+  /*Spacing tokens*/
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+
+  /* Radius */
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-full: 9999px;
+
+  /* Shadows */
+  --shadow-sm: 0 1px 2px rgba(7, 7, 25, 0.06);
+  --shadow-md: 0 8px 24px rgba(7, 7, 25, 0.12);
+
+  /* Font sizes */
+  --font-size-sm: 0.75rem; /* 12px */
+  --font-size-base: 0.875rem; /* 14px */
+  --font-size-lg: 1rem; /* 16px */
+  --font-size-xl: 1.75rem; /* 28px */
+
+  /* Font weights */
+  --font-weight-regular: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
+  --font-weight-bold: 700;
+
+  /* Typography */
+  --font-family-base: 'Inter', system-ui, sans-serif;
 }
+/* Breakpoints (reference only — var() does not work in @media)
+   md: 768px  → tablet, sidebar collapses
+   lg: 1024px → desktop
+   Use EXACTLY these values in @media queries. */
