@@ -4,9 +4,55 @@ from uuid import UUID
 from django.contrib.auth import get_user_model
 from django.db.models import QuerySet
 
-from .models import Workspace, WorkspaceMember
+from .models import Workspace, WorkspaceMember, Skill, WorkspaceMemberSkill
 
 User = get_user_model()
+
+
+
+class SkillSelector:
+
+    @staticmethod
+    def get_all_skills():
+        return Skill.objects.all().order_by("name")
+
+    @staticmethod
+    def get_by_code(*, code: str) -> Skill | None:
+        return Skill.objects.filter(code=code).first()
+
+    @staticmethod
+    def get_member_skills(*, workspace_member: WorkspaceMember):
+        return (Skill.objects.filter(member_skills__workspace_member=workspace_member).order_by("name"))
+
+    @staticmethod
+    def get_members_by_skill(*, workspace, skill: Skill):
+        return (
+            WorkspaceMember.objects
+            .filter(workspace=workspace, member_skills__skill=skill,)
+            .select_related("user", "workspace")
+            .distinct()
+            .order_by("user__email")
+        )
+
+    @staticmethod
+    def get_members_by_skill_code(*, workspace, skill_code: str):
+        return (
+            WorkspaceMember.objects
+            .filter(workspace=workspace, member_skills__skill__code=skill_code,)
+            .select_related("user", "workspace")
+            .distinct()
+            .order_by("user__email")
+        )
+
+    @staticmethod
+    def get_member_skill_data(member_skill: WorkspaceMemberSkill) -> dict:
+        return {
+            "id": str(member_skill.id),
+            "workspace_member_id": str(member_skill.workspace_member_id),
+            "skill_id": str(member_skill.skill_id),
+            "skill_code": member_skill.skill.code,
+            "skill_name": member_skill.skill.name,
+        }
 
 
 class WorkspaceMemberSelector:
@@ -88,3 +134,4 @@ class WorkspaceSelector:
             working_hours_per_day=workspace.working_hours_per_day,
             role=role,
         )
+
