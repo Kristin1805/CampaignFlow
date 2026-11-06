@@ -166,3 +166,57 @@ class WorkspaceMemberSkillService:
 
         WorkspaceMemberSkill.objects.filter(workspace_member=workspace_member, skill=skill,).delete()
 
+
+class WorkspaceService:
+    @staticmethod
+    @transaction.atomic
+    def create(*, user, name: str, timezone: str = "Europe/Sofia", working_days: list[int] | None = None, working_hours_per_day: int = 8,) -> Workspace:
+        workspace = Workspace(
+            name=name,
+            created_by=user,
+            timezone=timezone,
+            working_days=(
+                working_days
+                if working_days is not None
+                else [0, 1, 2, 3, 4]
+            ),
+            working_hours_per_day=working_hours_per_day,
+        )
+
+        workspace.full_clean()
+        workspace.save()
+
+        WorkspaceMember.objects.create(workspace=workspace, user=user, role=WorkspaceMember.Role.ADMIN,)
+
+        return workspace
+
+    @staticmethod
+    @transaction.atomic
+    def update(*, workspace: Workspace, acting_member: WorkspaceMember, data: dict,) -> Workspace:
+        if acting_member.workspace_id != workspace.id:
+            raise PermissionDenied("Member does not belong to workspace.")
+
+        if acting_member.role != WorkspaceMember.Role.ADMIN:
+            raise PermissionDenied("Only workspace admins can update settings.")
+
+        allowed_fields = {
+            "name",
+            "timezone",
+            "working_days",
+            "working_hours_per_day",
+        }
+
+        update_fields = []
+
+        for field, value in data.items():
+            if field not in allowed_fields:
+                continue
+
+            setattr(workspace, field, value)
+            update_fields.append(field)
+
+        if update_fields:
+            workspace.full_clean()
+            workspace.save(update_fields=[*update_fields, "updated_at"])
+
+        return workspace
