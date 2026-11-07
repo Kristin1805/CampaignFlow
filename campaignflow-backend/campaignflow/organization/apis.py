@@ -4,8 +4,9 @@ from rest_framework.response import Response
 
 from campaignflow.core.apis import PrivateApi
 from campaignflow.organization.models import WorkspaceMember
-from campaignflow.organization.selectors import WorkspaceSelector, WorkspaceInvitationSelector
-from campaignflow.organization.services import WorkspaceService, WorkspaceInvitationService
+from campaignflow.organization.permissions import WorkspacePermission
+from campaignflow.organization.selectors import WorkspaceSelector, WorkspaceInvitationSelector, WorkspaceMemberSelector
+from campaignflow.organization.services import WorkspaceService, WorkspaceInvitationService, WorkspaceMemberService
 from campaignflow.organization.validators import validate_timezone, validate_working_days
 
 
@@ -161,5 +162,91 @@ class WorkspaceInvitationRevokeApi(PrivateApi):
         workspace = WorkspaceInvitationListCreateApi.get_workspace(workspace_id=workspace_id, user=request.user)
         service = WorkspaceInvitationService(workspace=workspace, acting_user=request.user)
         service.revoke_invitation(invitation_id=invitation_id)
+
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+
+class WorkspaceMemberOutputSerializer(serializers.Serializer):
+    id = serializers.UUIDField()
+    workspace_id = serializers.UUIDField()
+    user_id = serializers.UUIDField()
+    role = serializers.CharField()
+    created_at = serializers.DateTimeField()
+
+
+class WorkspaceMemberListApi(PrivateApi):
+    OutputSerializer = WorkspaceMemberOutputSerializer
+
+    def get(self, request, workspace_id, *args, **kwargs):
+        membership = WorkspaceSelector.get_membership(workspace_id=workspace_id, user=request.user)
+
+        if membership is None:
+            raise NotFound("Workspace not found.")
+
+        members = WorkspaceMemberSelector.get_workspace_members(workspace=membership.workspace)
+
+        results = [WorkspaceMemberSelector.get_member_data(member) for member in members]
+
+        return Response(self.OutputSerializer(results, many=True).data, status=status.HTTP_200_OK)
+
+
+class WorkspaceMemberDetailApi(PrivateApi):
+    class InputSerializer(serializers.Serializer):
+        role = serializers.ChoiceField(choices=WorkspaceMember.Role.choices, required=True)
+
+    OutputSerializer = WorkspaceMemberOutputSerializer
+
+    @staticmethod
+    def get_workspace(*, workspace_id, user):
+        membership = WorkspaceSelector.get_membership(workspace_id=workspace_id, user=user)
+
+        if membership is None:
+            raise NotFound("Workspace not found.")
+
+        return membership.workspace
+
+    @staticmethod
+    def get_member(*, workspace, member_id):
+        member = WorkspaceMemberSelector.get_by_id(workspace=workspace, member_id=member_id)
+
+        if member is None:
+            raise NotFound("Workspace member not found.")
+
+        return member
+
+    def get(self, request, workspace_id, member_id, *args, **kwargs):
+        workspace = self.get_workspace(workspace_id=workspace_id, user=request.user)
+        member = self.get_member(workspace=workspace, member_id=member_id)
+
+        result = WorkspaceMemberSelector.get_member_data(member)
+
+        return Response(self.OutputSerializer(result).data, status=status.HTTP_200_OK)
+
+    def patch(self, request, workspace_id, member_id, *args, **kwargs):
+        workspace = self.get_workspace(workspace_id=workspace_id, user=request.user)
+
+        WorkspacePermission.require_admin(user=request.user, workspace=workspace)
+
+        serializer = self.InputSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        member = self.get_member(workspace=workspace, member_id=member_id)
+        service = WorkspaceMemberService(workspace=workspace, acting_user=request.user)
+
+        member = service.update_role(member=member, role=serializer.validated_data["role"])
+        result = WorkspaceMemberSelector.get_member_data(member)
+
+        return Response(self.OutputSerializer(result).data, status=status.HTTP_200_OK)
+
+    def delete(self, request, workspace_id, member_id, *args, **kwargs):
+        workspace = self.get_workspace(workspace_id=workspace_id, user=request.user)
+
+        WorkspacePermission.require_admin(user=request.user, workspace=workspace)
+
+        member = self.get_member(workspace=workspace, member_id=member_id)
+        service = WorkspaceMemberService(workspace=workspace, acting_user=request.user)
+
+        service.delete_member(member=member)
 
         return Response(status=status.HTTP_204_NO_CONTENT)
