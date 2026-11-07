@@ -7,7 +7,8 @@ from campaignflow.organization.apis import (
     WorkspaceInvitationAcceptApi,
     WorkspaceInvitationRevokeApi, WorkspaceMemberListApi, WorkspaceMemberDetailApi, SkillListApi,
     WorkspaceMemberSkillListCreateApi, WorkspaceMemberSkillDeleteApi, WorkspaceMemberAvailabilityApi,
-    WorkspaceMemberTimeOffListCreateApi, WorkspaceMemberTimeOffDeleteApi,
+    WorkspaceMemberTimeOffListCreateApi, WorkspaceMemberTimeOffDeleteApi, WorkspaceTeamCapacityApi,
+    WorkspaceMemberCapacityApi,
 )
 
 urlpatterns = [
@@ -27,4 +28,7 @@ urlpatterns = [
     path("workspaces/<uuid:workspace_id>/members/<uuid:member_id>/availability/", WorkspaceMemberAvailabilityApi.as_view(), name="workspace-member-availability"),
     path("workspaces/<uuid:workspace_id>/members/<uuid:member_id>/time-off/", WorkspaceMemberTimeOffListCreateApi.as_view(), name="workspace-member-time-off-list-create"),
     path("workspaces/<uuid:workspace_id>/members/<uuid:member_id>/time-off/<uuid:time_off_id>/", WorkspaceMemberTimeOffDeleteApi.as_view(), name="workspace-member-time-off-delete"),
+
+    path("workspaces/<uuid:workspace_id>/capacity/", WorkspaceTeamCapacityApi.as_view(), name="workspace-team-capacity"),
+    path("workspaces/<uuid:workspace_id>/members/<uuid:member_id>/capacity/", WorkspaceMemberCapacityApi.as_view(), name="workspace-member-capacity"),
 ]

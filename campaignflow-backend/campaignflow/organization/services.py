@@ -2,13 +2,15 @@ import hashlib
 from datetime import timedelta
 from uuid import UUID
 
-from django.core.exceptions import ValidationError as DjangoValidationError, ValidationError
+from django.core.exceptions import ValidationError as DjangoValidationError, ValidationError, ObjectDoesNotExist
 from django.db import transaction, IntegrityError
 from django.utils import timezone
 from rest_framework.exceptions import (PermissionDenied, ValidationError as DRFValidationError, NotFound, )
 
-from .models import Workspace, WorkspaceMember, Skill, WorkspaceMemberSkill, WorkspaceInvitation, WorkspaceMemberTimeOff
+from .models import Workspace, WorkspaceMember, Skill, WorkspaceMemberSkill, WorkspaceInvitation, \
+    WorkspaceMemberTimeOff, WorkspaceMemberAvailability
 from .permissions import WorkspacePermission, WorkspaceAvailabilityPermission
+from .selectors import WorkspaceCapacitySelector
 from .tasks import send_workspace_invitation_email
 from .validators import validate_time_off_dates
 
@@ -361,3 +363,92 @@ class WorkspaceMemberTimeOffService:
             raise NotFound("Time-off period not found.")
 
         time_off.delete()
+
+
+class WorkspaceCapacityService:
+    @staticmethod
+    def calculate_member_capacity(*, member: WorkspaceMember, start_date, end_date) -> dict:
+        try:
+            availability = member.availability
+        except ObjectDoesNotExist:
+            availability = None
+
+        working_days = availability.working_days if availability and availability.working_days is not None else member.workspace.working_days
+        working_hours = availability.working_hours_per_day if availability and availability.working_hours_per_day is not None else member.workspace.working_hours_per_day
+
+        time_off_periods = getattr(member, "capacity_time_off", None)
+
+        if time_off_periods is None:
+            time_off_periods = member.time_off_periods.filter(
+                start_date__lte=end_date, end_date__gte=start_date,
+            ).order_by("start_date")
+
+        time_off_dates = set()
+
+        for period in time_off_periods:
+            current_date = max(period.start_date, start_date)
+            last_date = min(period.end_date, end_date)
+
+            while current_date <= last_date:
+                time_off_dates.add(current_date)
+                current_date += timedelta(days=1)
+
+        daily_capacity = []
+        total_working_days = 0
+        unavailable_days = 0
+        total_available_hours = 0
+
+        current_date = start_date
+
+        while current_date <= end_date:
+            is_working_day = current_date.weekday() in working_days
+            is_time_off = current_date in time_off_dates
+
+            available_hours = working_hours if is_working_day and not is_time_off else 0
+
+            if is_working_day:
+                total_working_days += 1
+
+            if is_working_day and is_time_off:
+                unavailable_days += 1
+
+            total_available_hours += available_hours
+
+            daily_capacity.append({
+                "date": current_date,
+                "is_working_day": is_working_day,
+                "is_time_off": is_time_off,
+                "available_hours": available_hours,
+            })
+
+            current_date += timedelta(days=1)
+
+        return {
+            "workspace_member_id": member.id,
+            "user_id": member.user_id,
+            "start_date": start_date,
+            "end_date": end_date,
+            "working_days": working_days,
+            "working_hours_per_day": working_hours,
+            "total_working_days": total_working_days,
+            "unavailable_days": unavailable_days,
+            "total_available_hours": total_available_hours,
+            "daily_capacity": daily_capacity,
+        }
+
+    @classmethod
+    def calculate_team_capacity(cls, *, workspace: Workspace, start_date, end_date) -> dict:
+        members = WorkspaceCapacitySelector.get_workspace_members(workspace=workspace, start_date=start_date, end_date=end_date,)
+
+        member_capacities = [cls.calculate_member_capacity(member=member, start_date=start_date, end_date=end_date) for member in members]
+
+        return {
+            "workspace_id": workspace.id,
+            "start_date": start_date,
+            "end_date": end_date,
+            "total_members": len(member_capacities),
+            "total_working_days": sum(member["total_working_days"] for member in member_capacities),
+            "total_unavailable_days": sum(member["unavailable_days"] for member in member_capacities),
+            "total_available_hours": sum(member["total_available_hours"] for member in member_capacities),
+            "members": member_capacities,
+        }

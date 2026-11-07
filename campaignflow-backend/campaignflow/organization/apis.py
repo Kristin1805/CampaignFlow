@@ -6,9 +6,10 @@ from campaignflow.core.apis import PrivateApi
 from campaignflow.organization.models import WorkspaceMember
 from campaignflow.organization.permissions import WorkspacePermission, WorkspaceAvailabilityPermission
 from campaignflow.organization.selectors import WorkspaceSelector, WorkspaceInvitationSelector, WorkspaceMemberSelector, \
-    SkillSelector, WorkspaceMemberAvailabilitySelector, WorkspaceMemberTimeOffSelector
+    SkillSelector, WorkspaceMemberAvailabilitySelector, WorkspaceMemberTimeOffSelector, WorkspaceCapacitySelector
 from campaignflow.organization.services import WorkspaceService, WorkspaceInvitationService, WorkspaceMemberService, \
-    WorkspaceMemberSkillService, WorkspaceMemberAvailabilityService, WorkspaceMemberTimeOffService
+    WorkspaceMemberSkillService, WorkspaceMemberAvailabilityService, WorkspaceMemberTimeOffService, \
+    WorkspaceCapacityService
 from campaignflow.organization.validators import validate_timezone, validate_working_days
 
 
@@ -444,3 +445,86 @@ class WorkspaceMemberTimeOffDeleteApi(PrivateApi):
         service.delete(workspace_member=member, time_off_id=time_off_id)
 
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class WorkspaceCapacityQuerySerializer(serializers.Serializer):
+    start_date = serializers.DateField(required=True)
+    end_date = serializers.DateField(required=True)
+
+    def validate(self, attrs):
+        start_date = attrs["start_date"]
+        end_date = attrs["end_date"]
+
+        if start_date > end_date:
+            raise serializers.ValidationError({"end_date": "End date must be on or after start date."})
+
+        if (end_date - start_date).days > 365:
+            raise serializers.ValidationError({"end_date": "Date range cannot exceed 366 calendar days."})
+
+        return attrs
+
+
+class WorkspaceMemberCapacityOutputSerializer(serializers.Serializer):
+    class DailyCapacitySerializer(serializers.Serializer):
+        date = serializers.DateField()
+        is_working_day = serializers.BooleanField()
+        is_time_off = serializers.BooleanField()
+        available_hours = serializers.IntegerField()
+
+    workspace_member_id = serializers.UUIDField()
+    user_id = serializers.UUIDField()
+    start_date = serializers.DateField()
+    end_date = serializers.DateField()
+    working_days = serializers.ListField(child=serializers.IntegerField())
+    working_hours_per_day = serializers.IntegerField()
+    total_working_days = serializers.IntegerField()
+    unavailable_days = serializers.IntegerField()
+    total_available_hours = serializers.IntegerField()
+    daily_capacity = DailyCapacitySerializer(many=True)
+
+
+class WorkspaceTeamCapacityApi(PrivateApi):
+    class OutputSerializer(serializers.Serializer):
+        workspace_id = serializers.UUIDField()
+        start_date = serializers.DateField()
+        end_date = serializers.DateField()
+        total_members = serializers.IntegerField()
+        total_working_days = serializers.IntegerField()
+        total_unavailable_days = serializers.IntegerField()
+        total_available_hours = serializers.IntegerField()
+        members = WorkspaceMemberCapacityOutputSerializer(many=True)
+
+    def get(self, request, workspace_id, *args, **kwargs):
+        membership = WorkspaceSelector.get_membership(workspace_id=workspace_id, user=request.user)
+
+        if membership is None:
+            raise NotFound("Workspace not found.")
+
+        serializer = WorkspaceCapacityQuerySerializer(data=request.query_params)
+        serializer.is_valid(raise_exception=True)
+
+        result = WorkspaceCapacityService.calculate_team_capacity(workspace=membership.workspace, **serializer.validated_data,)
+
+        return Response(self.OutputSerializer(result).data, status=status.HTTP_200_OK)
+
+
+class WorkspaceMemberCapacityApi(PrivateApi):
+    OutputSerializer = WorkspaceMemberCapacityOutputSerializer
+
+    def get(self, request, workspace_id, member_id, *args, **kwargs):
+        membership = WorkspaceSelector.get_membership(workspace_id=workspace_id, user=request.user)
+
+        if membership is None:
+            raise NotFound("Workspace not found.")
+
+        serializer = WorkspaceCapacityQuerySerializer(data=request.query_params)
+        serializer.is_valid(raise_exception=True)
+
+        member = WorkspaceCapacitySelector.get_member(workspace=membership.workspace, member_id=member_id, **serializer.validated_data,)
+
+        if member is None:
+            raise NotFound("Workspace member not found.")
+
+        result = WorkspaceCapacityService.calculate_member_capacity(member=member, **serializer.validated_data,)
+
+        return Response(self.OutputSerializer(result).data, status=status.HTTP_200_OK)
