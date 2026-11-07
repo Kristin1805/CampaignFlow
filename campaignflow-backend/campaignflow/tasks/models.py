@@ -18,6 +18,13 @@ class Task(models.Model):
         blank=True,
         related_name="assigned_tasks",
     )
+    required_skill = models.ForeignKey(
+        "organization.Skill",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="tasks",
+    )
     title = models.CharField(max_length=255)
     description = models.TextField(blank=True)
     status = models.CharField(max_length=30, choices=TaskStatus.choices, default=TaskStatus.BACKLOG)
@@ -35,6 +42,7 @@ class Task(models.Model):
         indexes = [
             models.Index(fields=["campaign", "status"]),
             models.Index(fields=["assignee", "status"]),
+            models.Index(fields=["required_skill", "status"]),
             models.Index(fields=["planned_start", "planned_end"]),
         ]
 
