@@ -107,17 +107,19 @@ class TaskDependencySelector:
 class TaskStatusSelector:
     @staticmethod
     def get_task(*, workspace, task_id, for_update=False):
-        queryset = Task.objects.filter(id=task_id, campaign__workspace=workspace, campaign__is_archived=False
-        ).select_related("campaign", "assignee")
+        queryset = Task.objects.filter(id=task_id, campaign__workspace=workspace, campaign__is_archived=False,)
 
         if for_update:
-            queryset = queryset.select_for_update()
+            queryset = queryset.select_for_update(of=("self",))
+            queryset = queryset.select_related("campaign")
+        else:
+            queryset = queryset.select_related("campaign", "assignee")
 
         return queryset.first()
 
     @staticmethod
     def get_status_history(*, workspace, task_id):
-        return TaskStatusHistory.objects.filter(task_id=task_id, task__campaign__workspace=workspace).select_related("changed_by").order_by("created_at", "id")
+        return TaskStatusHistory.objects.filter(task_id=task_id, task__campaign__workspace=workspace,).select_related("changed_by").order_by("created_at", "id")
 
     @staticmethod
     def get_incomplete_dependencies(*, task):
@@ -145,7 +147,8 @@ class TaskCommentSelector:
             id=comment_id, task_id=task_id, task__campaign__workspace=workspace, is_deleted=False
         ).select_related("task", "author")
         if for_update:
-            queryset = queryset.select_for_update()
+            queryset = queryset.select_for_update(of=("self",))
+
         return queryset.first()
 
 

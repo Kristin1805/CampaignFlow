@@ -58,8 +58,16 @@ class CampaignService:
         if campaign is None:
             raise NotFound("Campaign not found.")
 
+        data = data.copy()
+        data.pop("revision", None)
+
+        previous_launch_at = campaign.launch_at
+
         for field, value in data.items():
             setattr(campaign, field, value)
+
+        if campaign.launch_at != previous_launch_at:
+            campaign.revision += 1
 
         cls.validate_campaign(campaign)
         campaign.save()

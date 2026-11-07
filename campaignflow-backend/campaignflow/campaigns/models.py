@@ -29,6 +29,7 @@ class Campaign(models.Model):
     starts_on = models.DateField(null=True, blank=True)
     ends_on = models.DateField(null=True, blank=True)
     launch_at = models.DateTimeField(null=True, blank=True,)
+    revision = models.PositiveIntegerField(default=0)
 
     budget_total = models.DecimalField(
         max_digits=12,

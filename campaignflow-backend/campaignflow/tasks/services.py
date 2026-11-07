@@ -1,6 +1,8 @@
+
 from django.apps import apps
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
+from django.db.models import F
 from django.utils import timezone
 from rest_framework.exceptions import NotFound, ValidationError
 
@@ -18,6 +20,22 @@ class TaskActivityService:
     @staticmethod
     def record(*, task, actor, action, metadata=None):
         return TaskActivity.objects.create(task=task, actor=actor, action=action, metadata=metadata or {})
+
+
+class CampaignRevisionService:
+    @staticmethod
+    def lock_campaign(*, workspace, campaign_id):
+        campaign = Campaign.objects.select_for_update().filter(
+            id=campaign_id, workspace=workspace, is_archived=False,
+        ).first()
+        if campaign is None:
+            raise NotFound("Campaign not found.")
+        return campaign
+
+    @staticmethod
+    def increment(*, campaign):
+        Campaign.objects.filter(pk=campaign.pk).update(revision=F("revision") + 1)
+        campaign.revision += 1
 
 
 class TaskService:
@@ -57,6 +75,8 @@ class TaskService:
         if campaign.workspace_id != workspace.id or campaign.is_archived:
             raise NotFound("Campaign not found.")
 
+        campaign = CampaignRevisionService.lock_campaign(workspace=workspace, campaign_id=campaign.id)
+
         data = data.copy()
         protected = {
             "status", "planned_start", "planned_end", "latest_start_at", "is_critical", "slack_hours",
@@ -94,11 +114,17 @@ class TaskService:
                 metadata={"previous_assignee_id": None, "assignee_id": str(assignee.id)},
             )
 
+        CampaignRevisionService.increment(campaign=campaign)
         return task
 
     @classmethod
     @transaction.atomic
     def update_task(cls, *, workspace, task_id, data, actor):
+        campaign_id = Task.objects.filter(id=task_id, campaign__workspace=workspace, campaign__is_archived=False,).values_list("campaign_id", flat=True).first()
+        if campaign_id is None:
+            raise NotFound("Task not found.")
+
+        campaign = CampaignRevisionService.lock_campaign(workspace=workspace, campaign_id=campaign_id)
         task = Task.objects.select_for_update().filter(
             id=task_id, campaign__workspace=workspace, campaign__is_archived=False
         ).first()
@@ -171,11 +197,19 @@ class TaskService:
                 },
             )
 
+        CampaignRevisionService.increment(campaign=campaign)
         return task
 
     @staticmethod
     @transaction.atomic
     def delete_task(*, workspace, task_id, actor=None):
+        campaign_id = Task.objects.filter(
+            id=task_id, campaign__workspace=workspace, campaign__is_archived=False,
+        ).values_list("campaign_id", flat=True).first()
+        if campaign_id is None:
+            raise NotFound("Task not found.")
+
+        campaign = CampaignRevisionService.lock_campaign(workspace=workspace, campaign_id=campaign_id)
         task = Task.objects.select_for_update().filter(
             id=task_id, campaign__workspace=workspace, campaign__is_archived=False
         ).first()
@@ -190,6 +224,7 @@ class TaskService:
             })
 
         task.delete()
+        CampaignRevisionService.increment(campaign=campaign)
 
 
 class TaskDependencyService:
@@ -229,11 +264,7 @@ class TaskDependencyService:
         if task.campaign_id != depends_on_task.campaign_id:
             raise ValidationError({"depends_on_task_id": "Tasks must belong to the same campaign."})
 
-        campaign = Campaign.objects.select_for_update().filter(
-            id=task.campaign_id, workspace=workspace, is_archived=False
-        ).first()
-        if campaign is None:
-            raise NotFound("Campaign not found.")
+        campaign = CampaignRevisionService.lock_campaign(workspace=workspace, campaign_id=task.campaign_id)
 
         if TaskDependency.objects.filter(task_id=task_id, depends_on_task_id=depends_on_task_id).exists():
             raise ValidationError({"depends_on_task_id": "This dependency already exists."})
@@ -257,6 +288,7 @@ class TaskDependencyService:
                 "lag_hours": str(dependency.lag_hours),
             },
         )
+        CampaignRevisionService.increment(campaign=campaign)
         return dependency
 
     @staticmethod
@@ -266,9 +298,7 @@ class TaskDependencyService:
         if dependency is None:
             raise NotFound("Dependency not found.")
 
-        campaign = Campaign.objects.select_for_update().filter(id=dependency.task.campaign_id, workspace=workspace, is_archived=False).first()
-        if campaign is None:
-            raise NotFound("Campaign not found.")
+        campaign = CampaignRevisionService.lock_campaign(workspace=workspace, campaign_id=dependency.task.campaign_id)
 
         TaskActivityService.record(
             task=dependency.task, actor=actor, action=TaskActivityType.DEPENDENCY_REMOVED,
@@ -278,7 +308,7 @@ class TaskDependencyService:
             },
         )
         dependency.delete()
-
+        CampaignRevisionService.increment(campaign=campaign)
 
 
 class TaskStatusService:
@@ -313,6 +343,13 @@ class TaskStatusService:
     @classmethod
     @transaction.atomic
     def change_status(cls, *, workspace, task_id, new_status, changed_by, approval_context=False):
+        campaign_id = Task.objects.filter(
+            id=task_id, campaign__workspace=workspace, campaign__is_archived=False,
+        ).values_list("campaign_id", flat=True).first()
+        if campaign_id is None:
+            raise NotFound("Task not found.")
+
+        campaign = CampaignRevisionService.lock_campaign(workspace=workspace, campaign_id=campaign_id)
         task = TaskStatusSelector.get_task(workspace=workspace, task_id=task_id, for_update=True)
         if task is None:
             raise NotFound("Task not found.")
@@ -345,6 +382,7 @@ class TaskStatusService:
 
         TaskStatusHistory.objects.create(task=task, previous_status=previous_status, new_status=new_status, changed_by=changed_by)
         TaskActivityService.record(task=task, actor=changed_by, action=TaskActivityType.STATUS_CHANGED, metadata={"previous_status": previous_status, "new_status": new_status},)
+        CampaignRevisionService.increment(campaign=campaign)
         return task
 
 
