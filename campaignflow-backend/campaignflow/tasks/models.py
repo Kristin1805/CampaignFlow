@@ -1,5 +1,6 @@
 import uuid
 
+from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core.validators import MinValueValidator
 from django.db import models
@@ -78,4 +79,20 @@ class TaskDependency(models.Model):
 
     def __str__(self):
         return f"{self.task_id} depends on {self.depends_on_task_id}"
+
+
+class TaskStatusHistory(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    task = models.ForeignKey("tasks.Task", on_delete=models.CASCADE, related_name="status_history")
+    previous_status = models.CharField(max_length=30, choices=TaskStatus.choices)
+    new_status = models.CharField(max_length=30, choices=TaskStatus.choices)
+    changed_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="task_status_changes")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at", "id"]
+        indexes = [models.Index(fields=["task", "created_at"])]
+
+    def __str__(self):
+        return f"{self.task_id}: {self.previous_status} -> {self.new_status}"
 
