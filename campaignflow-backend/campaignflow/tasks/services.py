@@ -1,4 +1,4 @@
-
+from django.apps import apps
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
 from django.utils import timezone
@@ -33,6 +33,18 @@ class TaskService:
         return member
 
     @staticmethod
+    def validate_required_skill(*, workspace, required_skill_id):
+        if required_skill_id is None:
+            return None
+
+        Skill = apps.get_model("organization", "Skill")
+        skill = Skill.objects.filter(id=required_skill_id).first()
+        if skill is None:
+            raise ValidationError({"required_skill_id": "Skill not found."})
+
+        return skill
+
+    @staticmethod
     def validate_task(task):
         try:
             task.full_clean()
@@ -52,7 +64,10 @@ class TaskService:
         assignee_id = data.pop("assignee_id", None)
         assignee = cls.validate_assignee(workspace=workspace, assignee_id=assignee_id)
 
-        task = Task(campaign=campaign, assignee=assignee, **data)
+        required_skill_id = data.pop("required_skill_id", None)
+        required_skill = cls.validate_required_skill(workspace=workspace, required_skill_id=required_skill_id)
+
+        task = Task(campaign=campaign, assignee=assignee, required_skill=required_skill, **data)
         cls.validate_task(task)
         task.save()
 
