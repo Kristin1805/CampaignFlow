@@ -1,10 +1,12 @@
+import hashlib
+
 from attrs import asdict, define
 from uuid import UUID
 
 from django.contrib.auth import get_user_model
 from django.db.models import QuerySet
 
-from .models import Workspace, WorkspaceMember, Skill, WorkspaceMemberSkill
+from .models import Workspace, WorkspaceMember, Skill, WorkspaceMemberSkill, WorkspaceInvitation
 
 User = get_user_model()
 
@@ -135,3 +137,43 @@ class WorkspaceSelector:
             role=role,
         )
 
+
+@define
+class WorkspaceInvitationResult:
+    id: UUID
+    workspace_id: UUID
+    email: str
+    role: str
+    status: str
+    expires_at: object
+    created_at: object
+
+    def serialize(self):
+        return asdict(self)
+
+
+class WorkspaceInvitationSelector:
+    @staticmethod
+    def get_workspace_invitations(*, workspace: Workspace):
+        return WorkspaceInvitation.objects.filter(workspace=workspace).select_related("invited_by").order_by("-created_at")
+
+    @staticmethod
+    def get_by_token(*, token: str) -> WorkspaceInvitation | None:
+        token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        return WorkspaceInvitation.objects.filter(token_hash=token_hash).select_related("workspace").first()
+
+    @staticmethod
+    def get_by_id(*, workspace: Workspace, invitation_id: UUID) -> WorkspaceInvitation | None:
+        return WorkspaceInvitation.objects.filter(id=invitation_id, workspace=workspace).first()
+
+    @staticmethod
+    def serialize_invitation(*, invitation: WorkspaceInvitation) -> WorkspaceInvitationResult:
+        return WorkspaceInvitationResult(
+            id=invitation.id,
+            workspace_id=invitation.workspace_id,
+            email=invitation.email,
+            role=invitation.role,
+            status=invitation.status,
+            expires_at=invitation.expires_at,
+            created_at=invitation.created_at,
+        )
