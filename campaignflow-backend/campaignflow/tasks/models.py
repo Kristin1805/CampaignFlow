@@ -96,3 +96,49 @@ class TaskStatusHistory(models.Model):
     def __str__(self):
         return f"{self.task_id}: {self.previous_status} -> {self.new_status}"
 
+
+class TaskActivityType(models.TextChoices):
+    CREATED = "task_created", "Task Created"
+    UPDATED = "task_updated", "Task Updated"
+    ASSIGNED = "task_assigned", "Task Assigned"
+    STATUS_CHANGED = "status_changed", "Status Changed"
+    DEPENDENCY_ADDED = "dependency_added", "Dependency Added"
+    DEPENDENCY_REMOVED = "dependency_removed", "Dependency Removed"
+    COMMENT_ADDED = "comment_added", "Comment Added"
+    COMMENT_UPDATED = "comment_updated", "Comment Updated"
+    COMMENT_DELETED = "comment_deleted", "Comment Deleted"
+
+
+class TaskComment(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    task = models.ForeignKey("tasks.Task", on_delete=models.CASCADE, related_name="comments")
+    author = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="task_comments")
+    content = models.TextField(max_length=5000)
+    is_deleted = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    deleted_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["created_at", "id"]
+        indexes = [models.Index(fields=["task", "created_at"])]
+
+    def __str__(self):
+        return f"Comment {self.id} on task {self.task_id}"
+
+
+class TaskActivity(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    task = models.ForeignKey("tasks.Task", on_delete=models.CASCADE, related_name="activities")
+    actor = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="task_activities")
+    action = models.CharField(max_length=40, choices=TaskActivityType.choices)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at", "id"]
+        indexes = [models.Index(fields=["task", "created_at"])]
+
+    def __str__(self):
+        return f"{self.action} on task {self.task_id}"
+

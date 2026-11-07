@@ -1,13 +1,23 @@
 
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
+from django.utils import timezone
 from rest_framework.exceptions import NotFound, ValidationError
 
 from campaignflow.campaigns.models import Campaign
 from campaignflow.organization.models import WorkspaceMember
 from campaignflow.tasks.enums import TaskStatus
-from campaignflow.tasks.models import Task, TaskDependency, TaskStatusHistory
-from campaignflow.tasks.selectors import TaskSelector, TaskDependencySelector, TaskStatusSelector
+from campaignflow.tasks.models import (
+    Task, TaskDependency, TaskStatusHistory, TaskComment, TaskActivity, TaskActivityType,
+)
+from campaignflow.tasks.selectors import TaskDependencySelector, TaskStatusSelector, TaskCommentSelector
+from campaignflow.tasks.permissions import TaskCommentPermission
+
+
+class TaskActivityService:
+    @staticmethod
+    def record(*, task, actor, action, metadata=None):
+        return TaskActivity.objects.create(task=task, actor=actor, action=action, metadata=metadata or {})
 
 
 class TaskService:
@@ -16,8 +26,7 @@ class TaskService:
         if assignee_id is None:
             return None
 
-        member = WorkspaceMember.objects.filter(id=assignee_id, workspace=workspace,).first()
-
+        member = WorkspaceMember.objects.filter(id=assignee_id, workspace=workspace).first()
         if member is None:
             raise ValidationError({"assignee_id": "Workspace member not found."})
 
@@ -32,11 +41,14 @@ class TaskService:
 
     @classmethod
     @transaction.atomic
-    def create_task(cls, *, workspace, campaign, data):
-        if campaign.workspace_id != workspace.id:
+    def create_task(cls, *, workspace, campaign, data, actor):
+        if campaign.workspace_id != workspace.id or campaign.is_archived:
             raise NotFound("Campaign not found.")
 
         data = data.copy()
+        if "status" in data:
+            raise ValidationError({"status": "Tasks must be created with the default backlog status."})
+
         assignee_id = data.pop("assignee_id", None)
         assignee = cls.validate_assignee(workspace=workspace, assignee_id=assignee_id)
 
@@ -44,35 +56,90 @@ class TaskService:
         cls.validate_task(task)
         task.save()
 
+        TaskActivityService.record(
+            task=task, actor=actor, action=TaskActivityType.CREATED,
+            metadata={"title": task.title},
+        )
+
+        if assignee is not None:
+            TaskActivityService.record(
+                task=task, actor=actor, action=TaskActivityType.ASSIGNED,
+                metadata={"previous_assignee_id": None, "assignee_id": str(assignee.id)},
+            )
+
         return task
 
     @classmethod
     @transaction.atomic
-    def update_task(cls, *, workspace, task_id, data):
-        task = Task.objects.select_for_update().filter(id=task_id, campaign__workspace=workspace,).first()
-
+    def update_task(cls, *, workspace, task_id, data, actor):
+        task = Task.objects.select_for_update().filter(
+            id=task_id, campaign__workspace=workspace, campaign__is_archived=False
+        ).first()
         if task is None:
             raise NotFound("Task not found.")
 
         data = data.copy()
+        protected = {"status", "campaign", "campaign_id", "id", "created_at", "updated_at"}
+        if protected.intersection(data):
+            raise ValidationError({"fields": "Status and protected task fields cannot be updated here."})
+
+        allowed = {
+            "title", "description", "priority", "estimated_hours", "actual_hours",
+            "planned_start", "planned_end", "due_at", "assignee_id",
+        }
+        unknown = set(data) - allowed
+        if unknown:
+            raise ValidationError({"fields": f"Unsupported fields: {', '.join(sorted(unknown))}"})
+
+        changes = {}
+        old_assignee_id = task.assignee_id
 
         if "assignee_id" in data:
-            assignee_id = data.pop("assignee_id")
-            task.assignee = cls.validate_assignee(workspace=workspace, assignee_id=assignee_id)
+            assignee = cls.validate_assignee(workspace=workspace, assignee_id=data.pop("assignee_id"))
+            if task.assignee_id != (assignee.id if assignee else None):
+                task.assignee = assignee
+                changes["assignee_id"] = {
+                    "old": str(old_assignee_id) if old_assignee_id else None,
+                    "new": str(task.assignee_id) if task.assignee_id else None,
+                }
 
         for field, value in data.items():
-            setattr(task, field, value)
+            old_value = getattr(task, field)
+            if old_value != value:
+                changes[field] = {
+                    "old": str(old_value) if old_value is not None else None,
+                    "new": str(value) if value is not None else None,
+                }
+                setattr(task, field, value)
+
+        if not changes:
+            return task
 
         cls.validate_task(task)
         task.save()
+
+        TaskActivityService.record(
+            task=task, actor=actor, action=TaskActivityType.UPDATED,
+            metadata={"changes": changes},
+        )
+
+        if "assignee_id" in changes:
+            TaskActivityService.record(
+                task=task, actor=actor, action=TaskActivityType.ASSIGNED,
+                metadata={
+                    "previous_assignee_id": changes["assignee_id"]["old"],
+                    "assignee_id": changes["assignee_id"]["new"],
+                },
+            )
 
         return task
 
     @staticmethod
     @transaction.atomic
-    def delete_task(*, workspace, task_id):
-        task = Task.objects.select_for_update().filter(id=task_id, campaign__workspace=workspace,).first()
-
+    def delete_task(*, workspace, task_id, actor=None):
+        task = Task.objects.select_for_update().filter(
+            id=task_id, campaign__workspace=workspace, campaign__is_archived=False
+        ).first()
         if task is None:
             raise NotFound("Task not found.")
 
@@ -102,7 +169,7 @@ class TaskDependencyService:
 
     @classmethod
     @transaction.atomic
-    def create_dependency(cls, *, workspace, task_id, depends_on_task_id, lag_hours=0):
+    def create_dependency(cls, *, workspace, task_id, depends_on_task_id, actor, lag_hours=0):
         task = TaskDependencySelector.get_task(workspace=workspace, task_id=task_id)
         if task is None:
             raise NotFound("Task not found.")
@@ -116,9 +183,11 @@ class TaskDependencyService:
         if task.campaign_id != depends_on_task.campaign_id:
             raise ValidationError({"depends_on_task_id": "Tasks must belong to the same campaign."})
 
-        Campaign.objects.select_for_update().get(
+        campaign = Campaign.objects.select_for_update().filter(
             id=task.campaign_id, workspace=workspace, is_archived=False
-        )
+        ).first()
+        if campaign is None:
+            raise NotFound("Campaign not found.")
 
         if TaskDependency.objects.filter(task_id=task_id, depends_on_task_id=depends_on_task_id).exists():
             raise ValidationError({"depends_on_task_id": "This dependency already exists."})
@@ -134,16 +203,34 @@ class TaskDependencyService:
             raise ValidationError(exc.message_dict if hasattr(exc, "message_dict") else exc.messages)
 
         dependency.save()
+        TaskActivityService.record(
+            task=task, actor=actor, action=TaskActivityType.DEPENDENCY_ADDED,
+            metadata={
+                "dependency_id": str(dependency.id),
+                "depends_on_task_id": str(depends_on_task_id),
+                "lag_hours": str(dependency.lag_hours),
+            },
+        )
         return dependency
 
     @staticmethod
     @transaction.atomic
-    def delete_dependency(*, workspace, task_id, dependency_id):
+    def delete_dependency(*, workspace, task_id, dependency_id, actor):
         dependency = TaskDependencySelector.get_dependency(workspace=workspace, task_id=task_id, dependency_id=dependency_id)
         if dependency is None:
             raise NotFound("Dependency not found.")
 
-        Campaign.objects.select_for_update().get(id=dependency.task.campaign_id, workspace=workspace, is_archived=False)
+        campaign = Campaign.objects.select_for_update().filter(id=dependency.task.campaign_id, workspace=workspace, is_archived=False).first()
+        if campaign is None:
+            raise NotFound("Campaign not found.")
+
+        TaskActivityService.record(
+            task=dependency.task, actor=actor, action=TaskActivityType.DEPENDENCY_REMOVED,
+            metadata={
+                "dependency_id": str(dependency.id),
+                "depends_on_task_id": str(dependency.depends_on_task_id),
+            },
+        )
         dependency.delete()
 
 
@@ -200,5 +287,71 @@ class TaskStatusService:
         task.status = new_status
         task.save(update_fields=["status", "updated_at"])
 
-        TaskStatusHistory.objects.create(task=task, previous_status=previous_status, new_status=new_status, changed_by=changed_by,)
+        TaskStatusHistory.objects.create(task=task, previous_status=previous_status, new_status=new_status, changed_by=changed_by)
+        TaskActivityService.record(task=task, actor=changed_by, action=TaskActivityType.STATUS_CHANGED, metadata={"previous_status": previous_status, "new_status": new_status},)
         return task
+
+
+class TaskCommentService:
+    @staticmethod
+    def validate_content(content):
+        if not isinstance(content, str) or not content.strip():
+            raise ValidationError({"content": "Comment cannot be empty."})
+        content = content.strip()
+        if len(content) > 5000:
+            raise ValidationError({"content": "Comment cannot exceed 5000 characters."})
+        return content
+
+    @classmethod
+    @transaction.atomic
+    def create_comment(cls, *, workspace, task_id, author, content):
+        task = TaskCommentSelector.get_task(workspace=workspace, task_id=task_id)
+        if task is None:
+            raise NotFound("Task not found.")
+
+        comment = TaskComment.objects.create(task=task, author=author, content=cls.validate_content(content))
+        TaskActivityService.record(
+            task=task, actor=author, action=TaskActivityType.COMMENT_ADDED,
+            metadata={"comment_id": str(comment.id)},
+        )
+        return comment
+
+    @classmethod
+    @transaction.atomic
+    def update_comment(cls, *, workspace, task_id, comment_id, user, membership, content):
+        comment = TaskCommentSelector.get_comment(workspace=workspace, task_id=task_id, comment_id=comment_id, for_update=True)
+        if comment is None or comment.task.campaign.is_archived:
+            raise NotFound("Comment not found.")
+
+        TaskCommentPermission.require_edit_access(membership=membership, comment=comment, user=user)
+
+        new_content = cls.validate_content(content)
+        if comment.content == new_content:
+            return comment
+
+        comment.content = new_content
+        comment.save(update_fields=["content", "updated_at"])
+
+        TaskActivityService.record(
+            task=comment.task, actor=user, action=TaskActivityType.COMMENT_UPDATED,
+            metadata={"comment_id": str(comment.id)},
+        )
+        return comment
+
+    @classmethod
+    @transaction.atomic
+    def delete_comment(cls, *, workspace, task_id, comment_id, user, membership):
+        comment = TaskCommentSelector.get_comment(workspace=workspace, task_id=task_id, comment_id=comment_id, for_update=True)
+        if comment is None or comment.task.campaign.is_archived:
+            raise NotFound("Comment not found.")
+
+        TaskCommentPermission.require_edit_access(membership=membership, comment=comment, user=user)
+
+        comment.is_deleted = True
+        comment.deleted_at = timezone.now()
+        comment.save(update_fields=["is_deleted", "deleted_at", "updated_at"])
+
+        TaskActivityService.record(
+            task=comment.task, actor=user, action=TaskActivityType.COMMENT_DELETED,
+            metadata={"comment_id": str(comment.id)},
+        )
