@@ -112,8 +112,13 @@ class WorkspaceMemberSkillService:
             raise DRFValidationError({"workspace_member": "Member does not belong to this workspace."})
 
         member_skill = WorkspaceMemberSkill(workspace_member=workspace_member, skill=skill)
-        member_skill.full_clean()
-        member_skill.save()
+
+        try:
+            with transaction.atomic():
+                member_skill.full_clean()
+                member_skill.save()
+        except (DjangoValidationError, IntegrityError) as exc:
+            raise DRFValidationError({"skill": "This skill is already assigned to the workspace member."}) from exc
 
         return member_skill
 
@@ -124,7 +129,10 @@ class WorkspaceMemberSkillService:
         if workspace_member.workspace_id != self.workspace.id:
             raise DRFValidationError({"workspace_member": "Member does not belong to this workspace."})
 
-        WorkspaceMemberSkill.objects.filter(workspace_member=workspace_member, skill=skill).delete()
+        deleted_count, _ = WorkspaceMemberSkill.objects.filter(workspace_member=workspace_member, skill=skill).delete()
+
+        if deleted_count == 0:
+            raise NotFound("Skill assignment not found.")
 
 
 class WorkspaceService:

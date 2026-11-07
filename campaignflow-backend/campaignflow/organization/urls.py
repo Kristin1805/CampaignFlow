@@ -5,7 +5,8 @@ from campaignflow.organization.apis import (
     WorkspaceListCreateApi,
     WorkspaceInvitationListCreateApi,
     WorkspaceInvitationAcceptApi,
-    WorkspaceInvitationRevokeApi, WorkspaceMemberListApi, WorkspaceMemberDetailApi,
+    WorkspaceInvitationRevokeApi, WorkspaceMemberListApi, WorkspaceMemberDetailApi, SkillListApi,
+    WorkspaceMemberSkillListCreateApi, WorkspaceMemberSkillDeleteApi,
 )
 
 urlpatterns = [
@@ -17,4 +18,7 @@ urlpatterns = [
     path("workspaces/<uuid:workspace_id>/invitations/<uuid:invitation_id>/", WorkspaceInvitationRevokeApi.as_view(), name="workspace-invitation-revoke"),
     path("workspaces/<uuid:workspace_id>/members/", WorkspaceMemberListApi.as_view(), name="workspace-member-list"),
     path("workspaces/<uuid:workspace_id>/members/<uuid:member_id>/", WorkspaceMemberDetailApi.as_view(), name="workspace-member-detail"),
+    path("skills/", SkillListApi.as_view(), name="skill-list"),
+    path("workspaces/<uuid:workspace_id>/members/<uuid:member_id>/skills/", WorkspaceMemberSkillListCreateApi.as_view(), name="workspace-member-skill-list-create"),
+    path("workspaces/<uuid:workspace_id>/members/<uuid:member_id>/skills/<uuid:skill_id>/", WorkspaceMemberSkillDeleteApi.as_view(), name="workspace-member-skill-delete"),
 ]

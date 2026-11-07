@@ -5,8 +5,10 @@ from rest_framework.response import Response
 from campaignflow.core.apis import PrivateApi
 from campaignflow.organization.models import WorkspaceMember
 from campaignflow.organization.permissions import WorkspacePermission
-from campaignflow.organization.selectors import WorkspaceSelector, WorkspaceInvitationSelector, WorkspaceMemberSelector
-from campaignflow.organization.services import WorkspaceService, WorkspaceInvitationService, WorkspaceMemberService
+from campaignflow.organization.selectors import WorkspaceSelector, WorkspaceInvitationSelector, WorkspaceMemberSelector, \
+    SkillSelector
+from campaignflow.organization.services import WorkspaceService, WorkspaceInvitationService, WorkspaceMemberService, \
+    WorkspaceMemberSkillService
 from campaignflow.organization.validators import validate_timezone, validate_working_days
 
 
@@ -166,7 +168,6 @@ class WorkspaceInvitationRevokeApi(PrivateApi):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
-
 class WorkspaceMemberOutputSerializer(serializers.Serializer):
     id = serializers.UUIDField()
     workspace_id = serializers.UUIDField()
@@ -248,5 +249,90 @@ class WorkspaceMemberDetailApi(PrivateApi):
         service = WorkspaceMemberService(workspace=workspace, acting_user=request.user)
 
         service.delete_member(member=member)
+
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class SkillListApi(PrivateApi):
+    class OutputSerializer(serializers.Serializer):
+        id = serializers.UUIDField()
+        code = serializers.CharField()
+        name = serializers.CharField()
+
+    def get(self, request, *args, **kwargs):
+        skills = SkillSelector.get_all_skills()
+        results = [SkillSelector.get_skill_data(skill) for skill in skills]
+
+        return Response(self.OutputSerializer(results, many=True).data, status=status.HTTP_200_OK)
+
+
+class WorkspaceMemberSkillListCreateApi(PrivateApi):
+    class InputSerializer(serializers.Serializer):
+        skill_id = serializers.UUIDField(required=True)
+
+    class OutputSerializer(serializers.Serializer):
+        id = serializers.UUIDField()
+        workspace_member_id = serializers.UUIDField()
+        skill_id = serializers.UUIDField()
+        skill_code = serializers.CharField()
+        skill_name = serializers.CharField()
+        created_at = serializers.DateTimeField()
+
+    @staticmethod
+    def get_workspace_member(*, workspace_id, member_id, user):
+        membership = WorkspaceSelector.get_membership(workspace_id=workspace_id, user=user)
+
+        if membership is None:
+            raise NotFound("Workspace not found.")
+
+        member = WorkspaceMemberSelector.get_by_id(workspace=membership.workspace, member_id=member_id)
+
+        if member is None:
+            raise NotFound("Workspace member not found.")
+
+        return membership.workspace, member
+
+    def get(self, request, workspace_id, member_id, *args, **kwargs):
+        workspace, member = self.get_workspace_member(workspace_id=workspace_id, member_id=member_id, user=request.user)
+
+        member_skills = SkillSelector.get_member_skills(workspace_member=member)
+        results = [SkillSelector.get_member_skill_data(member_skill) for member_skill in member_skills]
+
+        return Response(self.OutputSerializer(results, many=True).data, status=status.HTTP_200_OK)
+
+    def post(self, request, workspace_id, member_id, *args, **kwargs):
+        workspace, member = self.get_workspace_member(workspace_id=workspace_id, member_id=member_id, user=request.user)
+
+        WorkspacePermission.require_admin(user=request.user, workspace=workspace)
+
+        serializer = self.InputSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        skill = SkillSelector.get_by_id(skill_id=serializer.validated_data["skill_id"])
+
+        if skill is None:
+            raise NotFound("Skill not found.")
+
+        service = WorkspaceMemberSkillService(workspace=workspace, acting_user=request.user)
+        member_skill = service.assign_skill(workspace_member=member, skill=skill)
+
+        result = SkillSelector.get_member_skill_data(member_skill)
+
+        return Response(self.OutputSerializer(result).data, status=status.HTTP_201_CREATED)
+
+
+class WorkspaceMemberSkillDeleteApi(PrivateApi):
+    def delete(self, request, workspace_id, member_id, skill_id, *args, **kwargs):
+        workspace, member = WorkspaceMemberSkillListCreateApi.get_workspace_member(workspace_id=workspace_id, member_id=member_id, user=request.user,)
+
+        WorkspacePermission.require_admin(user=request.user, workspace=workspace)
+
+        skill = SkillSelector.get_by_id(skill_id=skill_id)
+
+        if skill is None:
+            raise NotFound("Skill not found.")
+
+        service = WorkspaceMemberSkillService(workspace=workspace, acting_user=request.user)
+        service.remove_skill(workspace_member=member, skill=skill)
 
         return Response(status=status.HTTP_204_NO_CONTENT)
