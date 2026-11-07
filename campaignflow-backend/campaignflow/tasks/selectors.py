@@ -6,7 +6,7 @@ from django.db.models import Count, DecimalField, Sum, Value
 from django.db.models.functions import Coalesce
 
 from campaignflow.tasks.enums import TaskStatus
-from campaignflow.tasks.models import Task
+from campaignflow.tasks.models import Task, TaskDependency
 
 
 class TaskSelector:
@@ -71,3 +71,34 @@ class TaskWorkloadSelector:
             }
             for row in rows
         }
+
+
+class TaskDependencySelector:
+    @staticmethod
+    def get_task(*, workspace, task_id):
+        return Task.objects.select_related("campaign").filter(
+            id=task_id, campaign__workspace=workspace, campaign__is_archived=False
+        ).first()
+
+    @staticmethod
+    def get_dependencies(*, workspace, task_id):
+        return TaskDependency.objects.filter(task_id=task_id, task__campaign__workspace=workspace, task__campaign__is_archived=False
+        ).select_related("task", "depends_on_task").order_by("created_at", "id")
+
+    @staticmethod
+    def get_dependents(*, workspace, task_id):
+        return TaskDependency.objects.filter(
+            depends_on_task_id=task_id, task__campaign__workspace=workspace,
+            task__campaign__is_archived=False
+        ).select_related("task", "depends_on_task").order_by("created_at", "id")
+
+    @staticmethod
+    def get_dependency(*, workspace, task_id, dependency_id):
+        return TaskDependency.objects.filter(
+            id=dependency_id, task_id=task_id,
+            task__campaign__workspace=workspace, task__campaign__is_archived=False
+        ).select_related("task").first()
+
+    @staticmethod
+    def get_campaign_graph(*, campaign_id):
+        return list(TaskDependency.objects.filter(task__campaign_id=campaign_id).values_list("task_id", "depends_on_task_id"))
