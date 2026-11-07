@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from rest_framework import serializers, status
 from rest_framework.exceptions import NotFound
 from rest_framework.response import Response
@@ -9,8 +11,9 @@ from campaignflow.organization.selectors import WorkspaceSelector, WorkspaceInvi
     SkillSelector, WorkspaceMemberAvailabilitySelector, WorkspaceMemberTimeOffSelector, WorkspaceCapacitySelector
 from campaignflow.organization.services import WorkspaceService, WorkspaceInvitationService, WorkspaceMemberService, \
     WorkspaceMemberSkillService, WorkspaceMemberAvailabilityService, WorkspaceMemberTimeOffService, \
-    WorkspaceCapacityService
+    WorkspaceCapacityService, WorkspaceWorkloadService
 from campaignflow.organization.validators import validate_timezone, validate_working_days
+from campaignflow.tasks.selectors import TaskWorkloadSelector
 
 
 class WorkspaceOutputSerializer(serializers.Serializer):
@@ -528,3 +531,87 @@ class WorkspaceMemberCapacityApi(PrivateApi):
         result = WorkspaceCapacityService.calculate_member_capacity(member=member, **serializer.validated_data,)
 
         return Response(self.OutputSerializer(result).data, status=status.HTTP_200_OK)
+
+
+class WorkspaceMemberWorkloadOutputSerializer(serializers.Serializer):
+    workspace_member_id = serializers.UUIDField()
+    user_id = serializers.UUIDField()
+    start_date = serializers.DateField()
+    end_date = serializers.DateField()
+    available_hours = serializers.DecimalField(max_digits=12, decimal_places=2)
+    assigned_hours = serializers.DecimalField(max_digits=12, decimal_places=2)
+    remaining_hours = serializers.DecimalField(max_digits=12, decimal_places=2)
+    utilization_percentage = serializers.DecimalField(max_digits=10, decimal_places=2, allow_null=True)
+    is_overloaded = serializers.BooleanField()
+    active_tasks_count = serializers.IntegerField()
+
+
+class WorkspaceTeamWorkloadApi(PrivateApi):
+    class OutputSerializer(serializers.Serializer):
+        workspace_id = serializers.UUIDField()
+        start_date = serializers.DateField()
+        end_date = serializers.DateField()
+        total_members = serializers.IntegerField()
+        available_hours = serializers.DecimalField(max_digits=12, decimal_places=2)
+        assigned_hours = serializers.DecimalField(max_digits=12, decimal_places=2)
+        remaining_hours = serializers.DecimalField(max_digits=12, decimal_places=2)
+        utilization_percentage = serializers.DecimalField(max_digits=10, decimal_places=2, allow_null=True)
+        is_overloaded = serializers.BooleanField()
+        overloaded_members_count = serializers.IntegerField()
+        active_tasks_count = serializers.IntegerField()
+        members = WorkspaceMemberWorkloadOutputSerializer(many=True)
+
+    def get(self, request, workspace_id, *args, **kwargs):
+        membership = WorkspaceSelector.get_membership(workspace_id=workspace_id, user=request.user)
+
+        if membership is None:
+            raise NotFound("Workspace not found.")
+
+        serializer = WorkspaceCapacityQuerySerializer(data=request.query_params)
+        serializer.is_valid(raise_exception=True)
+        dates = serializer.validated_data
+
+        capacity = WorkspaceCapacityService.calculate_team_capacity(workspace=membership.workspace, **dates)
+
+        task_totals = TaskWorkloadSelector.get_workspace_task_totals(
+            workspace=membership.workspace, **dates,
+        )
+
+        result = WorkspaceWorkloadService.calculate_team_workload(
+            workspace_id=membership.workspace.id,
+            member_capacities=capacity["members"],
+            task_totals=task_totals,
+            **dates,
+        )
+
+        return Response(self.OutputSerializer(result).data, status=status.HTTP_200_OK)
+
+
+class WorkspaceMemberWorkloadApi(PrivateApi):
+    OutputSerializer = WorkspaceMemberWorkloadOutputSerializer
+
+    def get(self, request, workspace_id, member_id, *args, **kwargs):
+        membership = WorkspaceSelector.get_membership(workspace_id=workspace_id, user=request.user)
+
+        if membership is None:
+            raise NotFound("Workspace not found.")
+
+        serializer = WorkspaceCapacityQuerySerializer(data=request.query_params)
+        serializer.is_valid(raise_exception=True)
+        dates = serializer.validated_data
+
+        member = WorkspaceCapacitySelector.get_member(workspace=membership.workspace, member_id=member_id, **dates,)
+
+        if member is None:
+            raise NotFound("Workspace member not found.")
+
+        capacity = WorkspaceCapacityService.calculate_member_capacity(member=member, **dates)
+
+        task_totals = TaskWorkloadSelector.get_workspace_task_totals(workspace=membership.workspace, member_ids=[member.id], **dates,)
+
+        totals = task_totals.get(member.id, {"assigned_hours": Decimal("0"), "active_tasks_count": 0})
+
+        result = WorkspaceWorkloadService.calculate_member_workload(capacity=capacity, assigned_hours=totals["assigned_hours"], active_tasks_count=totals["active_tasks_count"],)
+
+        return Response(self.OutputSerializer(result).data, status=status.HTTP_200_OK)
+
