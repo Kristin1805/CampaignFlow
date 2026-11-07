@@ -1,10 +1,20 @@
 
-from django.core.exceptions import ValidationError
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
-from rest_framework.exceptions import PermissionDenied
+from rest_framework.exceptions import ( PermissionDenied, ValidationError as DRFValidationError,)
 
 from .models import Workspace, WorkspaceMember, Skill, WorkspaceMemberSkill
 from .permissions import WorkspacePermission
+
+
+def validate_workspace_model(workspace: Workspace) -> None:
+    try:
+        workspace.full_clean()
+    except DjangoValidationError as exc:
+        if hasattr(exc, "message_dict"):
+            raise DRFValidationError(exc.message_dict) from exc
+
+        raise DRFValidationError(exc.messages) from exc
 
 
 class WorkspaceMemberService:
@@ -17,9 +27,9 @@ class WorkspaceMemberService:
         return WorkspacePermission.require_admin(user=self.acting_user,workspace=self.workspace,)
 
     @staticmethod
-    def validate_role(role: str):
+    def validate_role(role: str) -> None:
         if role not in WorkspaceMember.Role.values:
-            raise ValidationError({
+            raise DjangoValidationError({
                 "role": "Invalid workspace role."
             })
 
@@ -74,10 +84,10 @@ class WorkspaceMemberService:
 
 
 @transaction.atomic
-def workspace_create(*, created_by, name: str, **extra_fields):
+def workspace_create(*, created_by, name: str, **extra_fields,) -> Workspace:
     workspace = Workspace(name=name, created_by=created_by, **extra_fields,)
 
-    workspace.full_clean()
+    validate_workspace_model(workspace)
     workspace.save()
 
     member = WorkspaceMember(workspace=workspace, user=created_by, role=WorkspaceMember.Role.ADMIN,)
@@ -99,8 +109,8 @@ class WorkspaceMemberSkillService:
         WorkspacePermission.require_admin(user=self.acting_user, workspace=self.workspace,)
 
         if workspace_member.workspace_id != self.workspace.id:
-            raise ValidationError({
-                "workspace_member": "Member does not belong to this workspace."
+            raise DjangoValidationError({
+                "workspace_member": ("Member does not belong to this workspace.")
             })
 
         member_skill = WorkspaceMemberSkill(workspace_member=workspace_member, skill=skill,)
@@ -123,12 +133,12 @@ class WorkspaceMemberSkillService:
 
 
 class WorkspaceService:
+
     @staticmethod
-    @transaction.atomic
     def create(*, user, name: str, timezone: str = "Europe/Sofia", working_days: list[int] | None = None, working_hours_per_day: int = 8,) -> Workspace:
-        workspace = Workspace(
-            name=name,
+        return workspace_create(
             created_by=user,
+            name=name,
             timezone=timezone,
             working_days=(
                 working_days
@@ -138,21 +148,13 @@ class WorkspaceService:
             working_hours_per_day=working_hours_per_day,
         )
 
-        workspace.full_clean()
-        workspace.save()
-
-        WorkspaceMember.objects.create(workspace=workspace, user=user, role=WorkspaceMember.Role.ADMIN,)
-
-        return workspace
-
     @staticmethod
     @transaction.atomic
     def update(*, workspace: Workspace, acting_member: WorkspaceMember, data: dict,) -> Workspace:
         if acting_member.workspace_id != workspace.id:
-            raise PermissionDenied("Member does not belong to workspace.")
+            raise PermissionDenied("Workspace access denied.")
 
-        if acting_member.role != WorkspaceMember.Role.ADMIN:
-            raise PermissionDenied("Only workspace admins can update settings.")
+        WorkspacePermission.require_admin(user=acting_member.user, workspace=workspace,)
 
         allowed_fields = {
             "name",
@@ -171,7 +173,8 @@ class WorkspaceService:
             update_fields.append(field)
 
         if update_fields:
-            workspace.full_clean()
-            workspace.save(update_fields=[*update_fields, "updated_at"])
+            validate_workspace_model(workspace)
+
+            workspace.save(update_fields=[*update_fields, "updated_at",],)
 
         return workspace
