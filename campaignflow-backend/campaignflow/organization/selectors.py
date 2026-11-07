@@ -6,55 +6,10 @@ from uuid import UUID
 from django.contrib.auth import get_user_model
 from django.db.models import QuerySet
 
-from .models import Workspace, WorkspaceMember, Skill, WorkspaceMemberSkill, WorkspaceInvitation
+from .models import Workspace, WorkspaceMember, Skill, WorkspaceMemberSkill, WorkspaceInvitation, \
+    WorkspaceMemberTimeOff, WorkspaceMemberAvailability
 
 User = get_user_model()
-
-
-
-class SkillSelector:
-
-    @staticmethod
-    def get_all_skills() -> QuerySet[Skill]:
-        return Skill.objects.all().order_by("name")
-
-    @staticmethod
-    def get_by_id(*, skill_id: UUID) -> Skill | None:
-        return Skill.objects.filter(id=skill_id).first()
-
-    @staticmethod
-    def get_by_code(*, code: str) -> Skill | None:
-        return Skill.objects.filter(code=code).first()
-
-    @staticmethod
-    def get_member_skills(*, workspace_member: WorkspaceMember) -> QuerySet[WorkspaceMemberSkill]:
-        return WorkspaceMemberSkill.objects.filter(workspace_member=workspace_member).select_related("skill").order_by("skill__name")
-
-    @staticmethod
-    def get_member_skill(*, workspace_member: WorkspaceMember, skill: Skill) -> WorkspaceMemberSkill | None:
-        return WorkspaceMemberSkill.objects.filter(workspace_member=workspace_member, skill=skill).select_related("skill").first()
-
-    @staticmethod
-    def get_members_by_skill(*, workspace: Workspace, skill: Skill) -> QuerySet[WorkspaceMember]:
-        return WorkspaceMember.objects.filter(workspace=workspace, member_skills__skill=skill).select_related("user").distinct()
-
-    @staticmethod
-    def get_members_by_skill_code(*, workspace: Workspace, skill_code: str) -> QuerySet[WorkspaceMember]:
-        return WorkspaceMember.objects.filter(workspace=workspace, member_skills__skill__code=skill_code).select_related("user").distinct()
-
-    @staticmethod
-    def get_skill_data(skill: Skill) -> dict:
-        return {"id": skill.id, "code": skill.code, "name": skill.name}
-
-    @staticmethod
-    def get_member_skill_data(member_skill: WorkspaceMemberSkill) -> dict:
-        return {
-            "id": member_skill.id,
-            "workspace_member_id": member_skill.workspace_member_id,
-            "skill_id": member_skill.skill_id,
-            "skill_code": member_skill.skill.code,
-            "skill_name": member_skill.skill.name,
-        }
 
 
 class WorkspaceMemberSelector:
@@ -65,7 +20,7 @@ class WorkspaceMemberSelector:
 
     @staticmethod
     def get_by_id(*, workspace: Workspace, member_id: UUID) -> WorkspaceMember | None:
-        return WorkspaceMember.objects.filter(id=member_id, workspace=workspace).first()
+        return WorkspaceMember.objects.filter(id=member_id, workspace=workspace).select_related("workspace").first()
 
     @staticmethod
     def get_workspace_members(*, workspace: Workspace) -> QuerySet[WorkspaceMember]:
@@ -197,3 +152,55 @@ class SkillSelector:
             "skill_name": member_skill.skill.name,
             "created_at": member_skill.created_at,
         }
+
+
+class WorkspaceMemberAvailabilitySelector:
+    @staticmethod
+    def get_by_member(*, workspace_member: WorkspaceMember) -> WorkspaceMemberAvailability | None:
+        return WorkspaceMemberAvailability.objects.filter(workspace_member=workspace_member).first()
+
+    @staticmethod
+    def get_effective_availability(*, workspace_member: WorkspaceMember) -> dict:
+        availability = WorkspaceMemberAvailabilitySelector.get_by_member(workspace_member=workspace_member)
+        workspace = workspace_member.workspace
+
+        return {
+            "workspace_member_id": workspace_member.id,
+            "working_days": availability.working_days if availability and availability.working_days is not None else workspace.working_days,
+            "working_hours_per_day": availability.working_hours_per_day if availability and availability.working_hours_per_day is not None else workspace.working_hours_per_day,
+            "custom_working_days": availability.working_days if availability else None,
+            "custom_working_hours_per_day": availability.working_hours_per_day if availability else None,
+        }
+
+
+class WorkspaceMemberTimeOffSelector:
+    @staticmethod
+    def get_member_time_off(*, workspace_member: WorkspaceMember) -> QuerySet[WorkspaceMemberTimeOff]:
+        return WorkspaceMemberTimeOff.objects.filter(workspace_member=workspace_member).order_by("start_date", "end_date")
+
+    @staticmethod
+    def get_by_id(*, workspace_member: WorkspaceMember, time_off_id: UUID) -> WorkspaceMemberTimeOff | None:
+        return WorkspaceMemberTimeOff.objects.filter(id=time_off_id, workspace_member=workspace_member).first()
+
+    @staticmethod
+    def has_overlapping_period(*, workspace_member: WorkspaceMember, start_date, end_date) -> bool:
+        return WorkspaceMemberTimeOff.objects.filter(
+            workspace_member=workspace_member, start_date__lte=end_date, end_date__gte=start_date,
+        ).exists()
+
+    @staticmethod
+    def get_time_off_data(time_off: WorkspaceMemberTimeOff) -> dict:
+        return {
+            "id": time_off.id,
+            "workspace_member_id": time_off.workspace_member_id,
+            "start_date": time_off.start_date,
+            "end_date": time_off.end_date,
+            "reason": time_off.reason,
+            "created_at": time_off.created_at,
+        }
+
+    @staticmethod
+    def get_member_time_off_for_period(*, workspace_member: WorkspaceMember, start_date, end_date) -> QuerySet[WorkspaceMemberTimeOff]:
+        return WorkspaceMemberTimeOff.objects.filter(
+            workspace_member=workspace_member, start_date__lte=end_date, end_date__gte=start_date,
+        ).order_by("start_date")

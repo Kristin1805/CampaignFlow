@@ -20,3 +20,9 @@ def validate_working_days(value):
         raise ValidationError(
             "Working days must be unique integers between 0 and 6."
         )
+
+
+
+def validate_time_off_dates(*, start_date, end_date):
+    if start_date > end_date:
+        raise ValidationError({"end_date": "End date must be on or after start date."})
