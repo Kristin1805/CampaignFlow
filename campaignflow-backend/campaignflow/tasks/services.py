@@ -58,8 +58,20 @@ class TaskService:
             raise NotFound("Campaign not found.")
 
         data = data.copy()
-        if "status" in data:
-            raise ValidationError({"status": "Tasks must be created with the default backlog status."})
+        protected = {
+            "status", "planned_start", "planned_end", "latest_start_at", "is_critical", "slack_hours",
+            "campaign", "campaign_id", "id", "created_at", "updated_at",
+        }
+        if protected.intersection(data):
+            raise ValidationError({"fields": "Status and optimizer plan fields cannot be set here."})
+
+        allowed = {
+            "title", "description", "priority", "estimated_hours", "actual_hours",
+            "due_at", "assignee_id", "required_skill_id",
+        }
+        unknown = set(data) - allowed
+        if unknown:
+            raise ValidationError({"fields": f"Unsupported fields: {', '.join(sorted(unknown))}"})
 
         assignee_id = data.pop("assignee_id", None)
         assignee = cls.validate_assignee(workspace=workspace, assignee_id=assignee_id)
@@ -94,13 +106,16 @@ class TaskService:
             raise NotFound("Task not found.")
 
         data = data.copy()
-        protected = {"status", "campaign", "campaign_id", "id", "created_at", "updated_at"}
+        protected = {
+            "status", "planned_start", "planned_end", "latest_start_at", "is_critical", "slack_hours",
+            "campaign", "campaign_id", "id", "created_at", "updated_at",
+        }
         if protected.intersection(data):
             raise ValidationError({"fields": "Status and protected task fields cannot be updated here."})
 
         allowed = {
             "title", "description", "priority", "estimated_hours", "actual_hours",
-            "planned_start", "planned_end", "due_at", "assignee_id",
+            "due_at", "assignee_id", "required_skill_id",
         }
         unknown = set(data) - allowed
         if unknown:
@@ -117,6 +132,15 @@ class TaskService:
                     "old": str(old_assignee_id) if old_assignee_id else None,
                     "new": str(task.assignee_id) if task.assignee_id else None,
                 }
+
+        if "required_skill_id" in data:
+            required_skill = cls.validate_required_skill(workspace=workspace, required_skill_id=data.pop("required_skill_id"))
+            if task.required_skill_id != (required_skill.id if required_skill else None):
+                changes["required_skill_id"] = {
+                    "old": str(task.required_skill_id) if task.required_skill_id else None,
+                    "new": str(required_skill.id) if required_skill else None,
+                }
+                task.required_skill = required_skill
 
         for field, value in data.items():
             old_value = getattr(task, field)
