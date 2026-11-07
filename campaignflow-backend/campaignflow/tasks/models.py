@@ -107,6 +107,8 @@ class TaskActivityType(models.TextChoices):
     COMMENT_ADDED = "comment_added", "Comment Added"
     COMMENT_UPDATED = "comment_updated", "Comment Updated"
     COMMENT_DELETED = "comment_deleted", "Comment Deleted"
+    ATTACHMENT_UPLOADED = "attachment_uploaded", "Attachment Uploaded"
+    ATTACHMENT_DELETED = "attachment_deleted", "Attachment Deleted"
 
 
 class TaskComment(models.Model):
