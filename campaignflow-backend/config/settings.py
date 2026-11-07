@@ -215,3 +215,8 @@ CACHES = {
         "LOCATION": "redis://127.0.0.1:6379/1",
     }
 }
+
+FRONTEND_URL = "http://localhost:5173"
+DEFAULT_FROM_EMAIL = "CampaignFlow <noreply@campaignflow.local>"
+
+EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"

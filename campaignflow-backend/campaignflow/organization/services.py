@@ -1,11 +1,15 @@
+import hashlib
+from datetime import timedelta
+from uuid import UUID
 
-from django.core.exceptions import ValidationError as DjangoValidationError
-from django.db import transaction
-from rest_framework.exceptions import ( PermissionDenied, ValidationError as DRFValidationError,)
+from django.core.exceptions import ValidationError as DjangoValidationError, ValidationError
+from django.db import transaction, IntegrityError
+from django.utils import timezone
+from rest_framework.exceptions import (PermissionDenied, ValidationError as DRFValidationError, NotFound, )
 
-from .models import Workspace, WorkspaceMember, Skill, WorkspaceMemberSkill
+from .models import Workspace, WorkspaceMember, Skill, WorkspaceMemberSkill, WorkspaceInvitation
 from .permissions import WorkspacePermission
-
+from .tasks import send_workspace_invitation_email
 
 def validate_workspace_model(workspace: Workspace) -> None:
     try:
@@ -178,3 +182,188 @@ class WorkspaceService:
             workspace.save(update_fields=[*update_fields, "updated_at",],)
 
         return workspace
+
+
+
+class WorkspaceInvitationService:
+    def __init__(self, *, workspace: Workspace, acting_user):
+        self.workspace = workspace
+        self.acting_user = acting_user
+
+    @transaction.atomic
+    def create_invitation(self, *, email: str, role: str = WorkspaceMember.Role.MEMBER) -> tuple[WorkspaceInvitation, str]:
+        WorkspacePermission.require_admin(user=self.acting_user, workspace=self.workspace)
+
+        email = email.strip().lower()
+
+        if role not in WorkspaceMember.Role.values:
+            raise DRFValidationError({"role": "Invalid workspace role."})
+
+        if WorkspaceMember.objects.filter(workspace=self.workspace, user__email__iexact=email).exists():
+            raise DRFValidationError({"email": "User is already a workspace member."})
+
+        now = timezone.now()
+
+        WorkspaceInvitation.objects.filter(
+            workspace=self.workspace, email=email, status=WorkspaceInvitation.Status.PENDING, expires_at__lte=now,
+        ).update(status=WorkspaceInvitation.Status.REVOKED, revoked_at=now)
+
+        if WorkspaceInvitation.objects.filter(workspace=self.workspace, email=email, status=WorkspaceInvitation.Status.PENDING).exists():
+            raise DRFValidationError({"email": "An active invitation already exists."})
+
+        token, token_hash = WorkspaceInvitation.generate_token()
+
+        invitation = WorkspaceInvitation(
+            workspace=self.workspace, email=email, role=role, token_hash=token_hash,
+            invited_by=self.acting_user, expires_at=now + timedelta(days=7),
+        )
+
+        try:
+            with transaction.atomic():
+                invitation.full_clean()
+                invitation.save()
+        except (DjangoValidationError, IntegrityError) as exc:
+            raise DRFValidationError({"email": "Unable to create invitation. Check for an existing pending invitation."}) from exc
+
+        transaction.on_commit(
+            lambda: send_workspace_invitation_email.delay(
+                email=invitation.email,
+                workspace_name=self.workspace.name,
+                token=token,
+            )
+        )
+
+        return invitation, token
+
+    @staticmethod
+    @transaction.atomic
+    def accept_invitation(*, token: str, user) -> WorkspaceMember:
+        if not user or not user.is_authenticated:
+            raise PermissionDenied("Authentication required.")
+
+        token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+        invitation = (
+            WorkspaceInvitation.objects.select_for_update()
+            .select_related("workspace")
+            .filter(token_hash=token_hash)
+            .first()
+        )
+
+        if invitation is None:
+            raise NotFound("Invitation not found.")
+
+        if invitation.status != WorkspaceInvitation.Status.PENDING:
+            raise DRFValidationError({"invitation": "Invitation is no longer active."})
+
+        if invitation.expires_at <= timezone.now():
+            raise DRFValidationError({"invitation": "Invitation has expired."})
+
+        if user.email.strip().lower() != invitation.email.strip().lower():
+            raise PermissionDenied("This invitation belongs to another email address.")
+
+        if WorkspaceMember.objects.filter(workspace=invitation.workspace, user=user).exists():
+            raise DRFValidationError({"invitation": "You are already a workspace member."})
+
+        member = WorkspaceMember(workspace=invitation.workspace, user=user, role=invitation.role)
+
+        try:
+            with transaction.atomic():
+                member.full_clean()
+                member.save()
+        except (DjangoValidationError, IntegrityError) as exc:
+            raise DRFValidationError({"invitation": "Unable to accept invitation or membership already exists."}) from exc
+
+        invitation.status = WorkspaceInvitation.Status.ACCEPTED
+        invitation.accepted_by = user
+        invitation.accepted_at = timezone.now()
+        invitation.save(update_fields=["status", "accepted_by", "accepted_at"])
+
+        return member
+
+    @transaction.atomic
+    def revoke_invitation(self, *, invitation_id: UUID) -> None:
+        WorkspacePermission.require_admin(user=self.acting_user, workspace=self.workspace)
+
+        invitation = (
+            WorkspaceInvitation.objects.select_for_update()
+            .filter(id=invitation_id, workspace=self.workspace)
+            .first()
+        )
+
+        if invitation is None:
+            raise NotFound("Invitation not found.")
+
+        if invitation.status != WorkspaceInvitation.Status.PENDING:
+            raise DRFValidationError({"invitation": "Only pending invitations can be revoked."})
+
+        invitation.status = WorkspaceInvitation.Status.REVOKED
+        invitation.revoked_at = timezone.now()
+        invitation.save(update_fields=["status", "revoked_at"])
+
+    @staticmethod
+    @transaction.atomic
+    def accept_invitation(*, token: str, user) -> WorkspaceMember:
+        if not user or not user.is_authenticated:
+            raise PermissionDenied("Authentication required.")
+
+        token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+        invitation = (
+            WorkspaceInvitation.objects.select_for_update()
+            .select_related("workspace")
+            .filter(token_hash=token_hash)
+            .first()
+        )
+
+        if invitation is None:
+            raise NotFound("Invitation not found.")
+
+        if invitation.status != WorkspaceInvitation.Status.PENDING:
+            raise DRFValidationError({"invitation": "Invitation is no longer active."})
+
+        if invitation.expires_at <= timezone.now():
+            raise DRFValidationError({"invitation": "Invitation has expired."})
+
+        if user.email.strip().lower() != invitation.email.strip().lower():
+            raise PermissionDenied("This invitation belongs to another email address.")
+
+        if WorkspaceMember.objects.filter(workspace=invitation.workspace, user=user).exists():
+            raise DRFValidationError({"invitation": "You are already a workspace member."})
+
+        member = WorkspaceMember(workspace=invitation.workspace, user=user, role=invitation.role)
+
+        try:
+            with transaction.atomic():
+                member.full_clean()
+                member.save()
+        except (DjangoValidationError, IntegrityError) as exc:
+            raise DRFValidationError({"invitation": "Unable to accept invitation or membership already exists."}) from exc
+
+        invitation.status = WorkspaceInvitation.Status.ACCEPTED
+        invitation.accepted_by = user
+        invitation.accepted_at = timezone.now()
+        invitation.save(update_fields=["status", "accepted_by", "accepted_at"])
+
+        return member
+
+    @transaction.atomic
+    def revoke_invitation(self, *, invitation_id: UUID) -> None:
+        WorkspacePermission.require_admin(user=self.acting_user, workspace=self.workspace)
+
+        invitation = (
+            WorkspaceInvitation.objects.select_for_update()
+            .filter(id=invitation_id, workspace=self.workspace)
+            .first()
+        )
+
+        if invitation is None:
+            raise NotFound("Invitation not found.")
+
+        if invitation.status != WorkspaceInvitation.Status.PENDING:
+            raise DRFValidationError({"invitation": "Only pending invitations can be revoked."})
+
+        invitation.status = WorkspaceInvitation.Status.REVOKED
+        invitation.revoked_at = timezone.now()
+        invitation.save(update_fields=["status", "revoked_at"])
+

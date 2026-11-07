@@ -1,8 +1,12 @@
+import hashlib
+import secrets
 import uuid
+from datetime import timedelta
 
 from django.conf import settings
 from django.core.validators import MinValueValidator, MaxValueValidator
 from django.db import models
+from django.utils import timezone
 
 from campaignflow.organization.validators import validate_timezone, validate_working_days
 
@@ -120,3 +124,46 @@ class WorkspaceMemberSkill(models.Model):
 
     def __str__(self):
         return f"{self.workspace_member.user.email} - {self.skill.name}"
+
+
+
+def default_invitation_expiration():
+    return timezone.now() + timedelta(days=7)
+
+
+class WorkspaceInvitation(models.Model):
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        ACCEPTED = "accepted", "Accepted"
+        REVOKED = "revoked", "Revoked"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("organization.Workspace", on_delete=models.CASCADE, related_name="invitations")
+    email = models.EmailField(max_length=254)
+    role = models.CharField(max_length=20, choices=WorkspaceMember.Role.choices, default=WorkspaceMember.Role.MEMBER)
+    token_hash = models.CharField(max_length=64, unique=True, editable=False)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
+    invited_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="sent_workspace_invitations")
+    accepted_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="accepted_workspace_invitations")
+    expires_at = models.DateTimeField(default=default_invitation_expiration)
+    accepted_at = models.DateTimeField(null=True, blank=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(fields=["workspace", "email"], condition=models.Q(status="pending"), name="unique_pending_workspace_invitation"),
+        ]
+        indexes = [
+            models.Index(fields=["workspace", "status"]),
+            models.Index(fields=["email", "status"]),
+        ]
+
+    @staticmethod
+    def generate_token():
+        token = secrets.token_urlsafe(32)
+        return token, hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+    def __str__(self):
+        return f"{self.email} - {self.workspace.name} ({self.status})"
