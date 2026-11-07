@@ -7,9 +7,11 @@ from django.db import transaction, IntegrityError
 from django.utils import timezone
 from rest_framework.exceptions import (PermissionDenied, ValidationError as DRFValidationError, NotFound, )
 
-from .models import Workspace, WorkspaceMember, Skill, WorkspaceMemberSkill, WorkspaceInvitation
-from .permissions import WorkspacePermission
+from .models import Workspace, WorkspaceMember, Skill, WorkspaceMemberSkill, WorkspaceInvitation, WorkspaceMemberTimeOff
+from .permissions import WorkspacePermission, WorkspaceAvailabilityPermission
 from .tasks import send_workspace_invitation_email
+from .validators import validate_time_off_dates
+
 
 def validate_workspace_model(workspace: Workspace) -> None:
     try:
@@ -285,3 +287,77 @@ class WorkspaceInvitationService:
         invitation.revoked_at = timezone.now()
         invitation.save(update_fields=["status", "revoked_at"])
 
+
+
+class WorkspaceMemberAvailabilityService:
+    def __init__(self, *, workspace: Workspace, acting_user):
+        self.workspace = workspace
+        self.acting_user = acting_user
+
+    @transaction.atomic
+    def update(self, *, workspace_member: WorkspaceMember, data: dict) -> WorkspaceMemberAvailability:
+        WorkspaceAvailabilityPermission.require_manage(user=self.acting_user, workspace=self.workspace, target_member=workspace_member)
+
+        WorkspaceMember.objects.select_for_update().get(pk=workspace_member.pk, workspace=self.workspace)
+
+        availability, _ = WorkspaceMemberAvailability.objects.get_or_create(workspace_member=workspace_member)
+
+        allowed_fields = {"working_days", "working_hours_per_day"}
+
+        for field, value in data.items():
+            if field in allowed_fields:
+                setattr(availability, field, value)
+
+        try:
+            availability.full_clean()
+        except DjangoValidationError as exc:
+            raise DRFValidationError(exc.message_dict if hasattr(exc, "message_dict") else exc.messages) from exc
+
+        availability.save()
+
+        return availability
+
+
+class WorkspaceMemberTimeOffService:
+    def __init__(self, *, workspace: Workspace, acting_user):
+        self.workspace = workspace
+        self.acting_user = acting_user
+
+    @transaction.atomic
+    def create(self, *, workspace_member: WorkspaceMember, start_date, end_date, reason: str = "") -> WorkspaceMemberTimeOff:
+        WorkspaceAvailabilityPermission.require_manage(user=self.acting_user, workspace=self.workspace, target_member=workspace_member)
+
+        WorkspaceMember.objects.select_for_update().get(pk=workspace_member.pk, workspace=self.workspace)
+
+        try:
+            validate_time_off_dates(start_date=start_date, end_date=end_date)
+        except DjangoValidationError as exc:
+            raise DRFValidationError(exc.message_dict if hasattr(exc, "message_dict") else exc.messages) from exc
+
+        if WorkspaceMemberTimeOff.objects.filter(
+            workspace_member=workspace_member, start_date__lte=end_date, end_date__gte=start_date,
+        ).exists():
+            raise DRFValidationError({"start_date": "Time-off period overlaps with an existing period."})
+
+        time_off = WorkspaceMemberTimeOff(workspace_member=workspace_member, start_date=start_date, end_date=end_date, reason=reason,)
+
+        try:
+            time_off.full_clean()
+            time_off.save()
+        except DjangoValidationError as exc:
+            raise DRFValidationError(exc.message_dict if hasattr(exc, "message_dict") else exc.messages) from exc
+
+        return time_off
+
+    @transaction.atomic
+    def delete(self, *, workspace_member: WorkspaceMember, time_off_id: UUID) -> None:
+        WorkspaceAvailabilityPermission.require_manage(user=self.acting_user, workspace=self.workspace, target_member=workspace_member)
+
+        WorkspaceMember.objects.select_for_update().get(pk=workspace_member.pk, workspace=self.workspace)
+
+        time_off = WorkspaceMemberTimeOff.objects.filter(id=time_off_id, workspace_member=workspace_member).first()
+
+        if time_off is None:
+            raise NotFound("Time-off period not found.")
+
+        time_off.delete()

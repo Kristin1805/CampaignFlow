@@ -4,11 +4,11 @@ from rest_framework.response import Response
 
 from campaignflow.core.apis import PrivateApi
 from campaignflow.organization.models import WorkspaceMember
-from campaignflow.organization.permissions import WorkspacePermission
+from campaignflow.organization.permissions import WorkspacePermission, WorkspaceAvailabilityPermission
 from campaignflow.organization.selectors import WorkspaceSelector, WorkspaceInvitationSelector, WorkspaceMemberSelector, \
-    SkillSelector
+    SkillSelector, WorkspaceMemberAvailabilitySelector, WorkspaceMemberTimeOffSelector
 from campaignflow.organization.services import WorkspaceService, WorkspaceInvitationService, WorkspaceMemberService, \
-    WorkspaceMemberSkillService
+    WorkspaceMemberSkillService, WorkspaceMemberAvailabilityService, WorkspaceMemberTimeOffService
 from campaignflow.organization.validators import validate_timezone, validate_working_days
 
 
@@ -334,5 +334,113 @@ class WorkspaceMemberSkillDeleteApi(PrivateApi):
 
         service = WorkspaceMemberSkillService(workspace=workspace, acting_user=request.user)
         service.remove_skill(workspace_member=member, skill=skill)
+
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class WorkspaceMemberAvailabilityApi(PrivateApi):
+    class InputSerializer(serializers.Serializer):
+        working_days = serializers.ListField(child=serializers.IntegerField(min_value=0, max_value=6), required=False, allow_null=True)
+        working_hours_per_day = serializers.IntegerField(min_value=1, max_value=24, required=False, allow_null=True)
+
+        def validate_working_days(self, value):
+            if value is not None:
+                validate_working_days(value)
+            return value
+
+    class OutputSerializer(serializers.Serializer):
+        workspace_member_id = serializers.UUIDField()
+        working_days = serializers.ListField(child=serializers.IntegerField())
+        working_hours_per_day = serializers.IntegerField()
+        custom_working_days = serializers.ListField(child=serializers.IntegerField(), allow_null=True)
+        custom_working_hours_per_day = serializers.IntegerField(allow_null=True)
+
+    @staticmethod
+    def get_workspace_member(*, workspace_id, member_id, user):
+        membership = WorkspaceSelector.get_membership(workspace_id=workspace_id, user=user)
+
+        if membership is None:
+            raise NotFound("Workspace not found.")
+
+        member = WorkspaceMemberSelector.get_by_id(workspace=membership.workspace, member_id=member_id)
+
+        if member is None:
+            raise NotFound("Workspace member not found.")
+
+        return membership.workspace, member
+
+    def get(self, request, workspace_id, member_id, *args, **kwargs):
+        workspace, member = self.get_workspace_member(workspace_id=workspace_id, member_id=member_id, user=request.user)
+        WorkspaceAvailabilityPermission.require_view(user=request.user, workspace=workspace)
+
+        result = WorkspaceMemberAvailabilitySelector.get_effective_availability(workspace_member=member)
+
+        return Response(self.OutputSerializer(result).data, status=status.HTTP_200_OK)
+
+    def patch(self, request, workspace_id, member_id, *args, **kwargs):
+        workspace, member = self.get_workspace_member(workspace_id=workspace_id, member_id=member_id, user=request.user)
+        WorkspaceAvailabilityPermission.require_manage(user=request.user, workspace=workspace, target_member=member)
+
+        serializer = self.InputSerializer(data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+
+        service = WorkspaceMemberAvailabilityService(workspace=workspace, acting_user=request.user)
+        service.update(workspace_member=member, data=serializer.validated_data)
+
+        result = WorkspaceMemberAvailabilitySelector.get_effective_availability(workspace_member=member)
+
+        return Response(self.OutputSerializer(result).data, status=status.HTTP_200_OK)
+
+
+class WorkspaceMemberTimeOffListCreateApi(PrivateApi):
+    class InputSerializer(serializers.Serializer):
+        start_date = serializers.DateField()
+        end_date = serializers.DateField()
+        reason = serializers.CharField(max_length=255, required=False, allow_blank=True, default="")
+
+        def validate(self, attrs):
+            if attrs["start_date"] > attrs["end_date"]:
+                raise serializers.ValidationError({"end_date": "End date must be on or after start date."})
+            return attrs
+
+    class OutputSerializer(serializers.Serializer):
+        id = serializers.UUIDField()
+        workspace_member_id = serializers.UUIDField()
+        start_date = serializers.DateField()
+        end_date = serializers.DateField()
+        reason = serializers.CharField(allow_blank=True)
+        created_at = serializers.DateTimeField()
+
+    def get(self, request, workspace_id, member_id, *args, **kwargs):
+        workspace, member = WorkspaceMemberAvailabilityApi.get_workspace_member(workspace_id=workspace_id, member_id=member_id, user=request.user)
+        WorkspaceAvailabilityPermission.require_view(user=request.user, workspace=workspace)
+
+        time_off_periods = WorkspaceMemberTimeOffSelector.get_member_time_off(workspace_member=member)
+        results = [WorkspaceMemberTimeOffSelector.get_time_off_data(time_off) for time_off in time_off_periods]
+
+        return Response(self.OutputSerializer(results, many=True).data, status=status.HTTP_200_OK)
+
+    def post(self, request, workspace_id, member_id, *args, **kwargs):
+        workspace, member = WorkspaceMemberAvailabilityApi.get_workspace_member(workspace_id=workspace_id, member_id=member_id, user=request.user)
+        WorkspaceAvailabilityPermission.require_manage(user=request.user, workspace=workspace, target_member=member)
+
+        serializer = self.InputSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        service = WorkspaceMemberTimeOffService(workspace=workspace, acting_user=request.user)
+        time_off = service.create(workspace_member=member, **serializer.validated_data)
+
+        result = WorkspaceMemberTimeOffSelector.get_time_off_data(time_off)
+
+        return Response(self.OutputSerializer(result).data, status=status.HTTP_201_CREATED)
+
+
+class WorkspaceMemberTimeOffDeleteApi(PrivateApi):
+    def delete(self, request, workspace_id, member_id, time_off_id, *args, **kwargs):
+        workspace, member = WorkspaceMemberAvailabilityApi.get_workspace_member(workspace_id=workspace_id, member_id=member_id, user=request.user)
+        WorkspaceAvailabilityPermission.require_manage(user=request.user, workspace=workspace, target_member=member)
+
+        service = WorkspaceMemberTimeOffService(workspace=workspace, acting_user=request.user)
+        service.delete(workspace_member=member, time_off_id=time_off_id)
 
         return Response(status=status.HTTP_204_NO_CONTENT)
