@@ -117,15 +117,15 @@ class WorkspaceResult:
 
 class WorkspaceSelector:
     @staticmethod
-    def get_user_workspaces(user) -> QuerySet[WorkspaceMember]:
+    def get_user_workspaces(*, user: User,) -> QuerySet[WorkspaceMember]:
         return (WorkspaceMember.objects.filter(user=user).select_related("workspace").order_by("workspace__name"))
 
     @staticmethod
-    def get_workspace_for_user(workspace_id: UUID, user,) -> Workspace | None:
-        return (Workspace.objects.filter(id=workspace_id, members__user=user).distinct().first())
+    def get_membership(*, workspace_id: UUID, user: User,) -> WorkspaceMember | None:
+        return (WorkspaceMember.objects.filter(workspace_id=workspace_id, user=user,).select_related("workspace").first())
 
     @staticmethod
-    def serialize_workspace(workspace: Workspace, role: str,) -> WorkspaceResult:
+    def serialize_workspace(*,workspace: Workspace, role: str,) -> WorkspaceResult:
         return WorkspaceResult(
             id=workspace.id,
             name=workspace.name,
