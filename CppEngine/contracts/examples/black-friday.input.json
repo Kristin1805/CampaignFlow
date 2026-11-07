@@ -1,0 +1,155 @@
+{
+  "campaign_id": "00000000-0000-0000-0000-000000000012",
+  "now": "2026-11-23T09:00:00+02:00",
+  "deadline": "2026-11-27T17:00:00+02:00",
+  "calendar": { "hours_per_day": 8, "day_start": "09:00", "work_days": [0,1,2,3,4] },
+  "tasks": [
+    {
+      "id": "00000000-0000-0000-0000-000000000101",
+      "title": "Campaign Brief",
+      "skill": "manager",
+      "estimate_h": 4,
+      "calibration": 1.0,
+      "remaining_ratio": 1.0,
+      "priority": 3,
+      "assignee_id": "00000000-0000-0000-0000-000000000001",
+      "locked_assignee": false,
+      "due": null,
+      "depends_on": []
+    },
+    {
+      "id": "00000000-0000-0000-0000-000000000102",
+      "title": "Copywriting",
+      "skill": "copy",
+      "estimate_h": 8,
+      "calibration": 1.0,
+      "remaining_ratio": 1.0,
+      "priority": 3,
+      "assignee_id": "00000000-0000-0000-0000-000000000002",
+      "locked_assignee": false,
+      "due": null,
+      "depends_on": [ { "task_id": "00000000-0000-0000-0000-000000000101", "lag_h": 0 } ]
+    },
+    {
+      "id": "00000000-0000-0000-0000-000000000103",
+      "title": "Graphic Design",
+      "skill": "design",
+      "estimate_h": 16,
+      "calibration": 1.0,
+      "remaining_ratio": 1.0,
+      "priority": 4,
+      "assignee_id": "00000000-0000-0000-0000-000000000003",
+      "locked_assignee": false,
+      "due": null,
+      "depends_on": [ { "task_id": "00000000-0000-0000-0000-000000000102", "lag_h": 0 } ]
+    },
+    {
+      "id": "00000000-0000-0000-0000-000000000104",
+      "title": "TikTok Video Editing",
+      "skill": "video",
+      "estimate_h": 12,
+      "calibration": 1.0,
+      "remaining_ratio": 1.0,
+      "priority": 2,
+      "assignee_id": "00000000-0000-0000-0000-000000000003",
+      "locked_assignee": false,
+      "due": null,
+      "depends_on": [ { "task_id": "00000000-0000-0000-0000-000000000102", "lag_h": 0 } ]
+    },
+    {
+      "id": "00000000-0000-0000-0000-000000000105",
+      "title": "Manager Approval",
+      "skill": "manager",
+      "estimate_h": 2,
+      "calibration": 1.0,
+      "remaining_ratio": 1.0,
+      "priority": 4,
+      "assignee_id": "00000000-0000-0000-0000-000000000001",
+      "locked_assignee": false,
+      "due": null,
+      "depends_on": [
+        { "task_id": "00000000-0000-0000-0000-000000000103", "lag_h": 0 },
+        { "task_id": "00000000-0000-0000-0000-000000000104", "lag_h": 0 }
+      ]
+    },
+    {
+      "id": "00000000-0000-0000-0000-000000000106",
+      "title": "Email Campaign Setup",
+      "skill": "email",
+      "estimate_h": 6,
+      "calibration": 1.0,
+      "remaining_ratio": 1.0,
+      "priority": 3,
+      "assignee_id": "00000000-0000-0000-0000-000000000005",
+      "locked_assignee": false,
+      "due": null,
+      "depends_on": [ { "task_id": "00000000-0000-0000-0000-000000000105", "lag_h": 0 } ]
+    },
+    {
+      "id": "00000000-0000-0000-0000-000000000107",
+      "title": "Facebook Ads Setup",
+      "skill": "ads",
+      "estimate_h": 4,
+      "calibration": 1.0,
+      "remaining_ratio": 1.0,
+      "priority": 3,
+      "assignee_id": "00000000-0000-0000-0000-000000000006",
+      "locked_assignee": false,
+      "due": null,
+      "depends_on": [ { "task_id": "00000000-0000-0000-0000-000000000105", "lag_h": 0 } ]
+    },
+    {
+      "id": "00000000-0000-0000-0000-000000000108",
+      "title": "Google Ads (text)",
+      "skill": "ads",
+      "estimate_h": 4,
+      "calibration": 1.0,
+      "remaining_ratio": 1.0,
+      "priority": 2,
+      "assignee_id": "00000000-0000-0000-0000-000000000005",
+      "locked_assignee": false,
+      "due": null,
+      "depends_on": [ { "task_id": "00000000-0000-0000-0000-000000000102", "lag_h": 0 } ]
+    },
+    {
+      "id": "00000000-0000-0000-0000-000000000109",
+      "title": "Instagram Post Scheduling",
+      "skill": "social",
+      "estimate_h": 2,
+      "calibration": 1.0,
+      "remaining_ratio": 1.0,
+      "priority": 2,
+      "assignee_id": "00000000-0000-0000-0000-000000000006",
+      "locked_assignee": false,
+      "due": null,
+      "depends_on": [ { "task_id": "00000000-0000-0000-0000-000000000105", "lag_h": 0 } ]
+    },
+    {
+      "id": "00000000-0000-0000-0000-000000000110",
+      "title": "Launch / Publishing",
+      "skill": "social",
+      "estimate_h": 1,
+      "calibration": 1.0,
+      "remaining_ratio": 1.0,
+      "priority": 4,
+      "assignee_id": "00000000-0000-0000-0000-000000000006",
+      "locked_assignee": false,
+      "due": null,
+      "depends_on": [
+        { "task_id": "00000000-0000-0000-0000-000000000106", "lag_h": 0 },
+        { "task_id": "00000000-0000-0000-0000-000000000107", "lag_h": 0 },
+        { "task_id": "00000000-0000-0000-0000-000000000108", "lag_h": 0 },
+        { "task_id": "00000000-0000-0000-0000-000000000109", "lag_h": 0 }
+      ]
+    }
+  ],
+  "people": [
+    { "id": "00000000-0000-0000-0000-000000000001", "name": "Maria",  "skills": ["manager"],         "capacity_h_per_day": 8, "busy_h": 0, "absences": [] },
+    { "id": "00000000-0000-0000-0000-000000000002", "name": "Ivan",   "skills": ["copy"],            "capacity_h_per_day": 8, "busy_h": 0, "absences": [] },
+    { "id": "00000000-0000-0000-0000-000000000003", "name": "Elena",  "skills": ["design", "video"], "capacity_h_per_day": 8, "busy_h": 0, "absences": [] },
+    { "id": "00000000-0000-0000-0000-000000000004", "name": "Petar",  "skills": ["design", "video"], "capacity_h_per_day": 8, "busy_h": 0, "absences": [] },
+    { "id": "00000000-0000-0000-0000-000000000005", "name": "Georgi", "skills": ["email", "ads"],    "capacity_h_per_day": 8, "busy_h": 0, "absences": [] },
+    { "id": "00000000-0000-0000-0000-000000000006", "name": "Nikol",  "skills": ["social", "ads"],   "capacity_h_per_day": 8, "busy_h": 0, "absences": [] }
+  ],
+  "options": { "reassign": true, "weights": { "slack": 50, "descendants": 30, "priority": 20 } }
+}
