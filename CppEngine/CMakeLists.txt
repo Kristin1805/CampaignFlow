@@ -9,12 +9,14 @@ option(CF_ENGINE_BUILD_TESTS "Build Catch2 unit tests" ON)
 
 include(FetchContent)
 FetchContent_Declare(json
-  URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz)
+  URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz
+  DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
 FetchContent_MakeAvailable(json)
 
 # Core logic lives in a library so tests can link it without main().
 add_library(cf_engine_core
-  src/cli.cpp)
+  src/cli.cpp
+  src/io.cpp)
 target_include_directories(cf_engine_core PUBLIC include)
 target_link_libraries(cf_engine_core PUBLIC nlohmann_json::nlohmann_json)
 target_compile_definitions(cf_engine_core PUBLIC
@@ -37,8 +39,11 @@ if(CF_ENGINE_BUILD_TESTS)
 
   enable_testing()
   add_executable(cf_engine_tests
-    tests/test_cli.cpp)
+    tests/test_cli.cpp
+    tests/test_io.cpp)
   target_link_libraries(cf_engine_tests PRIVATE cf_engine_core Catch2::Catch2WithMain)
+  target_compile_definitions(cf_engine_tests PRIVATE
+    CF_ENGINE_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures")
 
   list(APPEND CMAKE_MODULE_PATH ${catch2_SOURCE_DIR}/extras)
   include(Catch)

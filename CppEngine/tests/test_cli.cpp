@@ -37,16 +37,24 @@ TEST_CASE("missing or unknown command is invalid input") {
     REQUIRE(r.out["code"] == "invalid_command");
 }
 
-TEST_CASE("echo returns the parsed input") {
+TEST_CASE("echo returns the input unchanged") {
     auto r = run_cli({"echo"}, R"({"title":"Graphic Design","n":1})");
     REQUIRE(r.code == 0);
-    REQUIRE(r.out["echo"]["title"] == "Graphic Design");
+    REQUIRE(r.out == json{{"title", "Graphic Design"}, {"n", 1}});
 }
 
 TEST_CASE("echo keeps UTF-8 text") {
     auto r = run_cli({"echo"}, R"({"title":"Копирайтинг"})");
     REQUIRE(r.code == 0);
-    REQUIRE(r.out["echo"]["title"] == "Копирайтинг");
+    REQUIRE(r.out["title"] == "Копирайтинг");
+}
+
+TEST_CASE("not yet implemented commands still answer with JSON") {
+    for (const char* cmd : {"optimize", "validate"}) {
+        auto r = run_cli({cmd}, "{}");
+        REQUIRE(r.code == 3);
+        REQUIRE(r.out["code"] == "not_implemented");
+    }
 }
 
 TEST_CASE("broken JSON exits with 3, not 2 (2 is reserved for cycles)") {

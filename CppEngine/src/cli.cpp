@@ -1,68 +1,67 @@
 #include "cf_engine/cli.hpp"
 
-#include <iostream>
-#include <iterator>
-#include <nlohmann/json.hpp>
+#include <exception>
+#include <ostream>
 
+#include "cf_engine/errors.hpp"
 #include "cf_engine/exit_codes.hpp"
+#include "cf_engine/io.hpp"
 
 namespace cf_engine {
 namespace {
 
 using json = nlohmann::json;
 
-void write_error(std::ostream& out, const std::string& code,
-                 const std::string& message) {
-    out << json{{"code", code}, {"message", message}}.dump() << "\n";
-}
-
 const char* usage() {
     return "usage: cf_engine <optimize|validate|echo> < input.json\n"
            "       cf_engine --version\n";
 }
 
-int echo(std::istream& in, std::ostream& out) {
-    std::string raw((std::istreambuf_iterator<char>(in)),
-                    std::istreambuf_iterator<char>());
-    json input;
-    try {
-        input = json::parse(raw);
-    } catch (const json::parse_error& e) {
-        write_error(out, "invalid_json", e.what());
-        return to_int(ExitCode::InvalidInput);
+int dispatch(const std::vector<std::string>& args, std::istream& in,
+             std::ostream& out, std::ostream& err) {
+    if (args.empty()) {
+        err << usage();
+        throw EngineError(ExitCode::InvalidInput, "invalid_command", "missing command");
     }
-    out << json{{"echo", input}}.dump() << "\n";
-    return to_int(ExitCode::Ok);
+
+    const std::string& command = args[0];
+
+    if (command == "--version") {
+        write_json(out, {{"engine_version", CF_ENGINE_VERSION}});
+        return to_int(ExitCode::Ok);
+    }
+    if (command == "echo") {
+        write_json(out, read_json(in));
+        return to_int(ExitCode::Ok);
+    }
+    if (command == "optimize" || command == "validate") {
+        // Implemented in later tickets (SCRUM-40, SCRUM-50).
+        throw EngineError(ExitCode::InvalidInput, "not_implemented",
+                          command + " is not implemented yet");
+    }
+
+    err << usage();
+    throw EngineError(ExitCode::InvalidInput, "invalid_command",
+                      "unknown command: " + command);
 }
 
 }  // namespace
 
 int run(const std::vector<std::string>& args, std::istream& in,
         std::ostream& out, std::ostream& err) {
-    if (args.empty()) {
-        err << usage();
-        write_error(out, "invalid_command", "missing command");
+    // Django parses stdout, so every path must end with one JSON object there
+    // and an exit code from the contract — never a crash or exit 1.
+    try {
+        return dispatch(args, in, out, err);
+    } catch (const EngineError& e) {
+        err << "cf_engine: " << e.code() << ": " << e.what() << "\n";
+        write_error(out, e.code(), e.what(), e.details());
+        return to_int(e.exit_code());
+    } catch (const std::exception& e) {
+        err << "cf_engine: internal_error: " << e.what() << "\n";
+        write_error(out, "internal_error", e.what());
         return to_int(ExitCode::InvalidInput);
     }
-
-    const std::string& command = args[0];
-
-    if (command == "--version") {
-        out << json{{"engine_version", CF_ENGINE_VERSION}}.dump() << "\n";
-        return to_int(ExitCode::Ok);
-    }
-    if (command == "echo") {
-        return echo(in, out);
-    }
-    if (command == "optimize" || command == "validate") {
-        // Implemented in later tickets (SCRUM-40, SCRUM-50).
-        write_error(out, "not_implemented", command + " is not implemented yet");
-        return to_int(ExitCode::InvalidInput);
-    }
-
-    err << usage();
-    write_error(out, "invalid_command", "unknown command: " + command);
-    return to_int(ExitCode::InvalidInput);
 }
 
 }  // namespace cf_engine

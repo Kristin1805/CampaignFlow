@@ -17,7 +17,7 @@ Tests are built by default; pass `-DCF_ENGINE_BUILD_TESTS=OFF` to skip Catch2.
 
 ```
 cf_engine --version
-cf_engine echo     < input.json   # returns {"echo": <input>}
+cf_engine echo     < input.json   # returns the input unchanged (pipe check)
 cf_engine validate < input.json   # not implemented yet
 cf_engine optimize < input.json   # not implemented yet
 ```
@@ -31,4 +31,6 @@ cf_engine optimize < input.json   # not implemented yet
 | 3 | Invalid input / invalid JSON / unknown command |
 | 4 | Infeasible (e.g. nobody has the required skill) |
 
-On any non-zero exit stdout is still a JSON object: `{"code": "...", "message": "..."}`.
+On any non-zero exit stdout is still a JSON object: `{"code": "...", "message": "..."}`,
+plus extra fields when relevant (e.g. `"cycle"`). A short human-readable line goes to stderr.
+Unexpected internal errors are reported as `internal_error` with exit 3, never a crash.
