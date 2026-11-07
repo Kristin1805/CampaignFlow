@@ -1,4 +1,3 @@
-
 from rest_framework import serializers, status
 from rest_framework.exceptions import NotFound, PermissionDenied
 from rest_framework.pagination import PageNumberPagination
@@ -23,6 +22,8 @@ class TaskOutputSerializer(serializers.Serializer):
     id = serializers.UUIDField()
     campaign_id = serializers.UUIDField()
     assignee_id = serializers.UUIDField(allow_null=True)
+    required_skill_id = serializers.UUIDField(allow_null=True)
+    required_skill_code = serializers.CharField(source="required_skill.code", read_only=True, allow_null=True)
     title = serializers.CharField()
     description = serializers.CharField()
     status = serializers.CharField()
@@ -40,6 +41,7 @@ class TaskInputSerializer(serializers.Serializer):
     title = serializers.CharField(max_length=255, required=False)
     description = serializers.CharField(required=False, allow_blank=True)
     assignee_id = serializers.UUIDField(required=False, allow_null=True)
+    required_skill_id = serializers.UUIDField(required=False, allow_null=True)
     priority = serializers.ChoiceField(choices=TaskPriority.choices, required=False)
     estimated_hours = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=0, required=False)
     actual_hours = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=0, required=False)
@@ -57,6 +59,10 @@ class TaskInputSerializer(serializers.Serializer):
                 field: "This field cannot be updated here." for field in sorted(unknown)
             })
         return super().to_internal_value(data)
+
+
+class TaskListQuerySerializer(serializers.Serializer):
+    skill = serializers.CharField(required=False, allow_blank=False, max_length=100)
 
 
 class TaskApiPermission:
@@ -83,7 +89,12 @@ class CampaignTasksApi(PrivateApi):
         if campaign is None:
             raise NotFound("Campaign not found.")
 
+        serializer = TaskListQuerySerializer(data=request.query_params)
+        serializer.is_valid(raise_exception=True)
+
         tasks = TaskSelector.get_campaign_tasks(workspace=membership.workspace, campaign_id=campaign_id)
+        if "skill" in serializer.validated_data:
+            tasks = tasks.filter(required_skill__code=serializer.validated_data["skill"])
         return Response(TaskOutputSerializer(tasks, many=True).data)
 
     def post(self, request, workspace_id, campaign_id, *args, **kwargs):
