@@ -5,8 +5,9 @@ from rest_framework.exceptions import NotFound, ValidationError
 
 from campaignflow.campaigns.models import Campaign
 from campaignflow.organization.models import WorkspaceMember
-from campaignflow.tasks.models import Task, TaskDependency
-from campaignflow.tasks.selectors import TaskSelector, TaskDependencySelector
+from campaignflow.tasks.enums import TaskStatus
+from campaignflow.tasks.models import Task, TaskDependency, TaskStatusHistory
+from campaignflow.tasks.selectors import TaskSelector, TaskDependencySelector, TaskStatusSelector
 
 
 class TaskService:
@@ -144,3 +145,60 @@ class TaskDependencyService:
 
         Campaign.objects.select_for_update().get(id=dependency.task.campaign_id, workspace=workspace, is_archived=False)
         dependency.delete()
+
+
+
+class TaskStatusService:
+    ALLOWED_TRANSITIONS = {
+        TaskStatus.BACKLOG: {TaskStatus.TODO, TaskStatus.CANCELLED},
+        TaskStatus.TODO: {TaskStatus.BACKLOG, TaskStatus.IN_PROGRESS, TaskStatus.CANCELLED},
+        TaskStatus.IN_PROGRESS: {TaskStatus.TODO, TaskStatus.IN_REVIEW, TaskStatus.CANCELLED},
+        TaskStatus.IN_REVIEW: {
+            TaskStatus.IN_PROGRESS, TaskStatus.CHANGES_REQUESTED,
+            TaskStatus.APPROVED, TaskStatus.CANCELLED,
+        },
+        TaskStatus.CHANGES_REQUESTED: {TaskStatus.IN_PROGRESS, TaskStatus.CANCELLED},
+        TaskStatus.APPROVED: {TaskStatus.COMPLETED, TaskStatus.IN_REVIEW, TaskStatus.CANCELLED},
+        TaskStatus.COMPLETED: set(),
+        TaskStatus.CANCELLED: set(),
+    }
+
+    @staticmethod
+    def validate_dependencies(*, task):
+        dependencies = TaskStatusSelector.get_incomplete_dependencies(task=task)
+        blocking_tasks = [
+            {"id": str(dep.depends_on_task_id), "title": dep.depends_on_task.title}
+            for dep in dependencies
+        ]
+
+        if blocking_tasks:
+            raise ValidationError({
+                "dependencies": "Cannot start task while prerequisite tasks are incomplete.",
+                "blocking_tasks": blocking_tasks,
+            })
+
+    @classmethod
+    @transaction.atomic
+    def change_status(cls, *, workspace, task_id, new_status, changed_by):
+        task = TaskStatusSelector.get_task(workspace=workspace, task_id=task_id, for_update=True)
+        if task is None:
+            raise NotFound("Task not found.")
+
+        if task.status == new_status:
+            return task
+
+        allowed = cls.ALLOWED_TRANSITIONS.get(task.status, set())
+        if new_status not in allowed:
+            raise ValidationError({
+                "status": f"Cannot change task status from '{task.status}' to '{new_status}'."
+            })
+
+        if new_status == TaskStatus.IN_PROGRESS:
+            cls.validate_dependencies(task=task)
+
+        previous_status = task.status
+        task.status = new_status
+        task.save(update_fields=["status", "updated_at"])
+
+        TaskStatusHistory.objects.create(task=task, previous_status=previous_status, new_status=new_status, changed_by=changed_by,)
+        return task

@@ -7,9 +7,9 @@ from campaignflow.core.apis import PrivateApi
 from campaignflow.organization.models import WorkspaceMember
 from campaignflow.organization.selectors import WorkspaceSelector
 from campaignflow.tasks.enums import TaskPriority, TaskStatus
-from campaignflow.tasks.permissions import TaskDependencyPermission
-from campaignflow.tasks.selectors import TaskSelector, TaskDependencySelector
-from campaignflow.tasks.services import TaskService, TaskDependencyService
+from campaignflow.tasks.permissions import TaskDependencyPermission, TaskStatusPermission
+from campaignflow.tasks.selectors import TaskSelector, TaskDependencySelector, TaskStatusSelector
+from campaignflow.tasks.services import TaskService, TaskDependencyService, TaskStatusService
 
 
 class TaskOutputSerializer(serializers.Serializer):
@@ -176,3 +176,44 @@ class TaskDependencyDeleteApi(PrivateApi):
 
         TaskDependencyService.delete_dependency(workspace=membership.workspace, task_id=task_id, dependency_id=dependency_id)
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class TaskStatusHistoryOutputSerializer(serializers.Serializer):
+    id = serializers.UUIDField()
+    task_id = serializers.UUIDField()
+    previous_status = serializers.CharField()
+    new_status = serializers.CharField()
+    changed_by_id = serializers.UUIDField()
+    created_at = serializers.DateTimeField()
+
+
+class TaskStatusUpdateApi(PrivateApi):
+    class InputSerializer(serializers.Serializer):
+        status = serializers.ChoiceField(choices=TaskStatus.choices)
+
+    def patch(self, request, workspace_id, task_id, *args, **kwargs):
+        membership = TaskStatusPermission.get_membership(workspace_id=workspace_id, user=request.user)
+        TaskStatusPermission.require_status_update(membership=membership)
+
+        serializer = self.InputSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        task = TaskStatusService.change_status(workspace=membership.workspace, task_id=task_id, new_status=serializer.validated_data["status"], changed_by=request.user,)
+
+        return Response({
+            "id": str(task.id),
+            "status": task.status,
+            "updated_at": task.updated_at,
+        }, status=status.HTTP_200_OK)
+
+
+class TaskStatusHistoryApi(PrivateApi):
+    def get(self, request, workspace_id, task_id, *args, **kwargs):
+        membership = TaskStatusPermission.get_membership(workspace_id=workspace_id, user=request.user)
+        task = TaskStatusSelector.get_task(workspace=membership.workspace, task_id=task_id)
+        if task is None:
+            raise NotFound("Task not found.")
+
+        history = TaskStatusSelector.get_status_history(workspace=membership.workspace, task_id=task_id)
+
+        return Response({"task_id": str(task.id),"history": TaskStatusHistoryOutputSerializer(history, many=True).data,}, status=status.HTTP_200_OK)
