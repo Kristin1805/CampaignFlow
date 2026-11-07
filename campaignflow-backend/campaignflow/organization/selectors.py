@@ -60,11 +60,7 @@ class SkillSelector:
 class WorkspaceMemberSelector:
 
     @staticmethod
-    def get_by_user_and_workspace(
-        *,
-        user: User,
-        workspace: Workspace,
-    ) -> WorkspaceMember | None:
+    def get_by_user_and_workspace(*, user: User, workspace: Workspace,) -> WorkspaceMember | None:
         return (
             WorkspaceMember.objects
             .filter(user=user, workspace=workspace)
@@ -72,25 +68,16 @@ class WorkspaceMemberSelector:
         )
 
     @staticmethod
-    def get_workspace_members(
-        *,
-        workspace: Workspace,
-    ):
-        return (
-            WorkspaceMember.objects
-            .filter(workspace=workspace)
-            .select_related("user", "workspace")
-            .order_by("user__email")
-        )
+    def get_by_id(*, workspace: Workspace, member_id: UUID) -> WorkspaceMember | None:
+        return WorkspaceMember.objects.filter(id=member_id, workspace=workspace).first()
+
+    @staticmethod
+    def get_workspace_members(*,workspace: Workspace,):
+        return (WorkspaceMember.objects.filter(workspace=workspace).select_related("user", "workspace").order_by("user__email"))
 
     @staticmethod
     def get_user_workspaces(*, user: User):
-        return (
-            Workspace.objects
-            .filter(members__user=user)
-            .distinct()
-            .order_by("name")
-        )
+        return (Workspace.objects.filter(members__user=user).distinct().order_by("name"))
 
     @staticmethod
     def get_member_data(member: WorkspaceMember) -> dict:
