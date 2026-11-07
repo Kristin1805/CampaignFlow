@@ -1,5 +1,6 @@
 import hashlib
 from datetime import timedelta
+from decimal import Decimal, ROUND_HALF_UP
 from uuid import UUID
 
 from django.core.exceptions import ValidationError as DjangoValidationError, ValidationError, ObjectDoesNotExist
@@ -183,7 +184,6 @@ class WorkspaceService:
         return workspace
 
 
-
 class WorkspaceInvitationService:
     def __init__(self, *, workspace: Workspace, acting_user):
         self.workspace = workspace
@@ -288,7 +288,6 @@ class WorkspaceInvitationService:
         invitation.status = WorkspaceInvitation.Status.REVOKED
         invitation.revoked_at = timezone.now()
         invitation.save(update_fields=["status", "revoked_at"])
-
 
 
 class WorkspaceMemberAvailabilityService:
@@ -451,4 +450,72 @@ class WorkspaceCapacityService:
             "total_unavailable_days": sum(member["unavailable_days"] for member in member_capacities),
             "total_available_hours": sum(member["total_available_hours"] for member in member_capacities),
             "members": member_capacities,
+        }
+
+
+class WorkspaceWorkloadService:
+    @staticmethod
+    def calculate_member_workload(*, capacity: dict, assigned_hours, active_tasks_count: int) -> dict:
+        available_hours = Decimal(str(capacity["total_available_hours"]))
+        assigned_hours = Decimal(str(assigned_hours))
+        remaining_hours = available_hours - assigned_hours
+
+        if available_hours > 0:
+            utilization = (assigned_hours / available_hours * 100).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        elif assigned_hours == 0:
+            utilization = Decimal("0.00")
+        else:
+            utilization = None
+
+        return {
+            "workspace_member_id": capacity["workspace_member_id"],
+            "user_id": capacity["user_id"],
+            "start_date": capacity["start_date"],
+            "end_date": capacity["end_date"],
+            "available_hours": available_hours,
+            "assigned_hours": assigned_hours,
+            "remaining_hours": remaining_hours,
+            "utilization_percentage": utilization,
+            "is_overloaded": assigned_hours > available_hours,
+            "active_tasks_count": active_tasks_count,
+        }
+
+    @classmethod
+    def calculate_team_workload(cls, *, workspace_id, start_date, end_date, member_capacities: list[dict], task_totals: dict) -> dict:
+        members = []
+
+        for capacity in member_capacities:
+            member_id = capacity["workspace_member_id"]
+            totals = task_totals.get(member_id, {"assigned_hours": Decimal("0"), "active_tasks_count": 0})
+
+            members.append(cls.calculate_member_workload(
+                capacity=capacity,
+                assigned_hours=totals["assigned_hours"],
+                active_tasks_count=totals["active_tasks_count"],
+            ))
+
+        available_hours = sum((member["available_hours"] for member in members), Decimal("0"))
+        assigned_hours = sum((member["assigned_hours"] for member in members), Decimal("0"))
+        remaining_hours = available_hours - assigned_hours
+
+        if available_hours > 0:
+            utilization = (assigned_hours / available_hours * 100).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        elif assigned_hours == 0:
+            utilization = Decimal("0.00")
+        else:
+            utilization = None
+
+        return {
+            "workspace_id": workspace_id,
+            "start_date": start_date,
+            "end_date": end_date,
+            "total_members": len(members),
+            "available_hours": available_hours,
+            "assigned_hours": assigned_hours,
+            "remaining_hours": remaining_hours,
+            "utilization_percentage": utilization,
+            "is_overloaded": any(member["is_overloaded"] for member in members),
+            "overloaded_members_count": sum(member["is_overloaded"] for member in members),
+            "active_tasks_count": sum(member["active_tasks_count"] for member in members),
+            "members": members,
         }
