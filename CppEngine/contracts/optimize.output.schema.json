@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "cf_engine optimize output v1",
+  "description": "Printed on stdout with exit code 0. On any other exit code stdout is an error object {code, message, ...details} instead (see CppEngine/README.md).",
+  "type": "object",
+  "required": ["feasible", "makespan_h", "available_h", "risk", "critical_path", "order",
+               "schedule", "changes", "must_finish_by", "engine_version", "elapsed_ms"],
+  "properties": {
+    "feasible":    { "type": "boolean" },
+    "makespan_h":  { "type": "number", "minimum": 0 },
+    "available_h": { "type": "number", "minimum": 0 },
+    "risk":        { "type": "string", "enum": ["LOW", "MEDIUM", "HIGH", "CRITICAL"] },
+
+    "critical_path": { "type": "array", "items": { "type": "string", "format": "uuid" } },
+    "order":         { "type": "array", "items": { "type": "string", "format": "uuid" } },
+
+    "schedule": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["task_id", "assignee_id", "start", "end", "latest_start", "slack_h", "critical"],
+        "properties": {
+          "task_id":      { "type": "string", "format": "uuid" },
+          "assignee_id":  { "type": ["string", "null"], "format": "uuid" },
+          "start":        { "type": "string", "format": "date-time" },
+          "end":          { "type": "string", "format": "date-time" },
+          "latest_start": { "type": "string", "format": "date-time" },
+          "slack_h":      { "type": "number", "minimum": 0 },
+          "critical":     { "type": "boolean" },
+          "score":        { "type": "number" }
+        }
+      }
+    },
+
+    "changes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["task_id", "field", "from", "to", "reason"],
+        "properties": {
+          "task_id": { "type": "string", "format": "uuid" },
+          "field":   { "type": "string", "enum": ["assignee_id"] },
+          "from":    { "type": ["string", "null"], "format": "uuid" },
+          "to":      { "type": ["string", "null"], "format": "uuid" },
+          "reason":  { "type": "string" }
+        }
+      }
+    },
+
+    "must_finish_by": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["task_id", "by"],
+        "properties": {
+          "task_id": { "type": "string", "format": "uuid" },
+          "by":      { "type": "string", "format": "date-time" }
+        }
+      }
+    },
+
+    "engine_version": { "type": "string" },
+    "elapsed_ms":     { "type": "integer", "minimum": 0 }
+  }
+}
