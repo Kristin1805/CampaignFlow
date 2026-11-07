@@ -7,8 +7,9 @@ from campaignflow.core.apis import PrivateApi
 from campaignflow.organization.models import WorkspaceMember
 from campaignflow.organization.selectors import WorkspaceSelector
 from campaignflow.tasks.enums import TaskPriority, TaskStatus
-from campaignflow.tasks.selectors import TaskSelector
-from campaignflow.tasks.services import TaskService
+from campaignflow.tasks.permissions import TaskDependencyPermission
+from campaignflow.tasks.selectors import TaskSelector, TaskDependencySelector
+from campaignflow.tasks.services import TaskService, TaskDependencyService
 
 
 class TaskOutputSerializer(serializers.Serializer):
@@ -126,4 +127,52 @@ class TaskDetailApi(PrivateApi):
 
         TaskService.delete_task(workspace=membership.workspace, task_id=task_id)
 
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class TaskDependencyOutputSerializer(serializers.Serializer):
+    id = serializers.UUIDField()
+    task_id = serializers.UUIDField()
+    depends_on_task_id = serializers.UUIDField()
+    lag_hours = serializers.DecimalField(max_digits=10, decimal_places=2)
+    created_at = serializers.DateTimeField()
+
+
+class TaskDependencyListCreateApi(PrivateApi):
+    class InputSerializer(serializers.Serializer):
+        depends_on_task_id = serializers.UUIDField()
+        lag_hours = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=0, required=False, default=0)
+
+    def get(self, request, workspace_id, task_id, *args, **kwargs):
+        membership = TaskDependencyPermission.get_membership(workspace_id=workspace_id, user=request.user)
+        task = TaskDependencySelector.get_task(workspace=membership.workspace, task_id=task_id)
+        if task is None:
+            raise NotFound("Task not found.")
+
+        dependencies = TaskDependencySelector.get_dependencies(workspace=membership.workspace, task_id=task_id)
+        dependents = TaskDependencySelector.get_dependents(workspace=membership.workspace, task_id=task_id)
+
+        return Response({
+            "task_id": str(task.id),
+            "dependencies": TaskDependencyOutputSerializer(dependencies, many=True).data,
+            "dependents": TaskDependencyOutputSerializer(dependents, many=True).data,
+        })
+
+    def post(self, request, workspace_id, task_id, *args, **kwargs):
+        membership = TaskDependencyPermission.get_membership(workspace_id=workspace_id, user=request.user)
+        TaskDependencyPermission.require_management(membership=membership)
+
+        serializer = self.InputSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        dependency = TaskDependencyService.create_dependency(workspace=membership.workspace, task_id=task_id, **serializer.validated_data)
+        return Response(TaskDependencyOutputSerializer(dependency).data, status=status.HTTP_201_CREATED)
+
+
+class TaskDependencyDeleteApi(PrivateApi):
+    def delete(self, request, workspace_id, task_id, dependency_id, *args, **kwargs):
+        membership = TaskDependencyPermission.get_membership(workspace_id=workspace_id, user=request.user)
+        TaskDependencyPermission.require_management(membership=membership)
+
+        TaskDependencyService.delete_dependency(workspace=membership.workspace, task_id=task_id, dependency_id=dependency_id)
         return Response(status=status.HTTP_204_NO_CONTENT)

@@ -49,3 +49,33 @@ class Task(models.Model):
 
     def __str__(self):
         return self.title
+
+
+class TaskDependency(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    task = models.ForeignKey("tasks.Task", on_delete=models.CASCADE, related_name="dependencies")
+    depends_on_task = models.ForeignKey("tasks.Task", on_delete=models.CASCADE, related_name="dependents")
+    lag_hours = models.DecimalField(max_digits=10, decimal_places=2, default=0, validators=[MinValueValidator(0)])
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at", "id"]
+        constraints = [
+            models.UniqueConstraint(fields=["task", "depends_on_task"], name="unique_task_dependency"),
+            models.CheckConstraint(
+                condition=~models.Q(task_id=models.F("depends_on_task_id")),
+                name="prevent_task_self_dependency",
+            ),
+        ]
+
+    def clean(self):
+        super().clean()
+        if self.task_id == self.depends_on_task_id:
+            raise ValidationError({"depends_on_task": "A task cannot depend on itself."})
+        if self.task_id and self.depends_on_task_id:
+            if self.task.campaign_id != self.depends_on_task.campaign_id:
+                raise ValidationError({"depends_on_task": "Both tasks must belong to the same campaign."})
+
+    def __str__(self):
+        return f"{self.task_id} depends on {self.depends_on_task_id}"
+
