@@ -10,6 +10,8 @@ class CampaignSelector:
         "-created_at": "-created_at",
         "starts_on": "starts_on",
         "-starts_on": "-starts_on",
+        "launch_at": "launch_at",
+        "-launch_at": "-launch_at",
         "name": "name",
         "-name": "-name",
     }

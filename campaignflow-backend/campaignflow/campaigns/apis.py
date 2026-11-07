@@ -20,6 +20,7 @@ class CampaignOutputSerializer(serializers.Serializer):
     status = serializers.CharField()
     starts_on = serializers.DateField(allow_null=True)
     ends_on = serializers.DateField(allow_null=True)
+    launch_at = serializers.DateTimeField(allow_null=True)
     budget_total = serializers.DecimalField(max_digits=12, decimal_places=2, allow_null=True)
     created_by_id = serializers.UUIDField()
     is_archived = serializers.BooleanField()
@@ -34,6 +35,7 @@ class CampaignInputSerializer(serializers.Serializer):
     goal = serializers.CharField(required=False, allow_blank=True)
     starts_on = serializers.DateField(required=False, allow_null=True)
     ends_on = serializers.DateField(required=False, allow_null=True)
+    launch_at = serializers.DateTimeField(required=False, allow_null=True)
     budget_total = serializers.DecimalField(
         max_digits=12,
         decimal_places=2,
