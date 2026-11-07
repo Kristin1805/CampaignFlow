@@ -4,7 +4,7 @@ from attrs import asdict, define
 from uuid import UUID
 
 from django.contrib.auth import get_user_model
-from django.db.models import QuerySet
+from django.db.models import QuerySet, Prefetch
 
 from .models import Workspace, WorkspaceMember, Skill, WorkspaceMemberSkill, WorkspaceInvitation, \
     WorkspaceMemberTimeOff, WorkspaceMemberAvailability
@@ -204,3 +204,16 @@ class WorkspaceMemberTimeOffSelector:
         return WorkspaceMemberTimeOff.objects.filter(
             workspace_member=workspace_member, start_date__lte=end_date, end_date__gte=start_date,
         ).order_by("start_date")
+
+
+class WorkspaceCapacitySelector:
+    @staticmethod
+    def get_workspace_members(*, workspace: Workspace, start_date, end_date) -> QuerySet[WorkspaceMember]:
+        time_off_queryset = WorkspaceMemberTimeOff.objects.filter(start_date__lte=end_date, end_date__gte=start_date,).order_by("start_date", "end_date")
+
+        return WorkspaceMember.objects.filter(workspace=workspace).select_related("user", "workspace", "availability",).prefetch_related(
+            Prefetch("time_off_periods", queryset=time_off_queryset, to_attr="capacity_time_off"),).order_by("user__email")
+
+    @staticmethod
+    def get_member(*, workspace: Workspace, member_id: UUID, start_date, end_date) -> WorkspaceMember | None:
+        return WorkspaceCapacitySelector.get_workspace_members(workspace=workspace, start_date=start_date, end_date=end_date,).filter(id=member_id).first()
