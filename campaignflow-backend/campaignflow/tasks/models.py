@@ -102,14 +102,21 @@ class TaskActivityType(models.TextChoices):
     UPDATED = "task_updated", "Task Updated"
     ASSIGNED = "task_assigned", "Task Assigned"
     STATUS_CHANGED = "status_changed", "Status Changed"
+
     DEPENDENCY_ADDED = "dependency_added", "Dependency Added"
     DEPENDENCY_REMOVED = "dependency_removed", "Dependency Removed"
+
     COMMENT_ADDED = "comment_added", "Comment Added"
     COMMENT_UPDATED = "comment_updated", "Comment Updated"
     COMMENT_DELETED = "comment_deleted", "Comment Deleted"
+
     ATTACHMENT_UPLOADED = "attachment_uploaded", "Attachment Uploaded"
     ATTACHMENT_DELETED = "attachment_deleted", "Attachment Deleted"
 
+    APPROVAL_REQUESTED = "approval_requested", "Approval Requested"
+    APPROVAL_APPROVED = "approval_approved", "Approval Approved"
+    APPROVAL_CHANGES_REQUESTED = "approval_changes_requested", "Approval Changes Requested"
+    APPROVAL_CANCELLED = "approval_cancelled", "Approval Cancelled"
 
 class TaskComment(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
