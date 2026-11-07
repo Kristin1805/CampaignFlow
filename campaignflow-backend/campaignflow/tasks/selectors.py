@@ -12,19 +12,19 @@ from campaignflow.tasks.models import Task, TaskDependency, TaskStatusHistory, T
 class TaskSelector:
     @staticmethod
     def get_by_id(*, workspace, task_id):
-        return Task.objects.select_related("campaign", "assignee", "assignee__user").filter(
+        return Task.objects.select_related("campaign", "assignee", "assignee__user", "required_skill").filter(
             id=task_id, campaign__workspace=workspace,
         ).first()
 
     @staticmethod
     def get_campaign_tasks(*, workspace, campaign_id):
-        return Task.objects.select_related("campaign", "assignee", "assignee__user").filter(
+        return Task.objects.select_related("campaign", "assignee", "assignee__user", "required_skill").filter(
             campaign_id=campaign_id, campaign__workspace=workspace,
         ).order_by("created_at")
 
     @staticmethod
     def get_workspace_tasks(*, workspace):
-        return Task.objects.select_related("campaign", "assignee", "assignee__user").filter(
+        return Task.objects.select_related("campaign", "assignee", "assignee__user", "required_skill").filter(
             campaign__workspace=workspace,
         ).order_by("created_at")
 
@@ -37,8 +37,8 @@ class TaskWorkloadSelector:
         queryset = Task.objects.filter(
             campaign__workspace=workspace,
             assignee__isnull=False,
-            planned_start__gte=start_date,
-            planned_start__lte=end_date,
+            planned_start__date__gte=start_date,
+            planned_start__date__lte=end_date,
         ).exclude(status__in=cls.EXCLUDED_STATUSES)
 
         if member_ids is not None:
