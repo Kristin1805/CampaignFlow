@@ -9,7 +9,8 @@ class TaskApprovalSelector:
         if not include_archived:
             queryset = queryset.filter(campaign__is_archived=False)
         if for_update:
-            queryset = queryset.select_for_update()
+            queryset = queryset.select_for_update(of=("self",))
+
         return queryset.first()
 
     @staticmethod
@@ -24,7 +25,7 @@ class TaskApprovalSelector:
 
     @staticmethod
     def get_pending_approval(*, task):
-        return TaskApproval.objects.filter(task=task, status=ApprovalStatus.PENDING).first()
+        return TaskApproval.objects.filter(task=task, status=ApprovalStatus.PENDING,).first()
 
     @staticmethod
     def get_pending_for_user(*, workspace, user, all_reviews=False):
@@ -34,7 +35,6 @@ class TaskApprovalSelector:
             status=ApprovalStatus.PENDING,
         )
         if not all_reviews:
-            queryset = queryset.filter(reviewer__user=user)
-        return queryset.select_related(
-            "task", "requested_by", "reviewer__user"
-        ).order_by("-created_at", "-id")
+            queryset = queryset.filter(reviewer__user=user,)
+
+        return queryset.select_related("task", "requested_by", "reviewer__user",).order_by("-created_at", "-id")

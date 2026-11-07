@@ -219,9 +219,7 @@ class TaskService:
         from campaignflow.approvals.models import TaskApproval, ApprovalStatus
 
         if TaskApproval.objects.filter(task=task, status=ApprovalStatus.PENDING).exists():
-            raise ValidationError({
-                "approval": "Cannot delete a task with a pending approval. Cancel the approval first."
-            })
+            raise ValidationError({"approval": "Cannot delete a task with a pending approval. Cancel the approval first."})
 
         task.delete()
         CampaignRevisionService.increment(campaign=campaign)
@@ -231,6 +229,7 @@ class TaskDependencyService:
     @staticmethod
     def creates_cycle(*, graph, task_id, depends_on_task_id):
         adjacency = {}
+
         for source, target in graph:
             adjacency.setdefault(source, set()).add(target)
 
@@ -239,10 +238,13 @@ class TaskDependencyService:
 
         while stack:
             current = stack.pop()
+
             if current == task_id:
                 return True
+
             if current in visited:
                 continue
+
             visited.add(current)
             stack.extend(adjacency.get(current, set()) - visited)
 
@@ -250,64 +252,93 @@ class TaskDependencyService:
 
     @classmethod
     @transaction.atomic
-    def create_dependency(cls, *, workspace, task_id, depends_on_task_id, actor, lag_hours=0):
-        task = TaskDependencySelector.get_task(workspace=workspace, task_id=task_id)
-        if task is None:
-            raise NotFound("Task not found.")
-
-        if task_id == depends_on_task_id:
+    def create_dependency(cls, *, workspace, task_id, depends_on_task_id, actor, lag_hours=0,):
+        if str(task_id) == str(depends_on_task_id):
             raise ValidationError({"depends_on_task_id": "A task cannot depend on itself."})
 
-        depends_on_task = TaskDependencySelector.get_task(workspace=workspace, task_id=depends_on_task_id)
+        campaign_id = Task.objects.filter(id=task_id,campaign__workspace=workspace,campaign__is_archived=False,).values_list("campaign_id", flat=True).first()
+
+        if campaign_id is None:
+            raise NotFound("Task not found.")
+
+        campaign = CampaignRevisionService.lock_campaign(workspace=workspace, campaign_id=campaign_id,)
+
+        task = TaskDependencySelector.get_task(workspace=workspace, task_id=task_id,)
+
+        if task is None or task.campaign_id != campaign.id:
+            raise NotFound("Task not found.")
+
+        depends_on_task = TaskDependencySelector.get_task(workspace=workspace, task_id=depends_on_task_id,)
+
         if depends_on_task is None:
             raise NotFound("Dependency task not found.")
+
         if task.campaign_id != depends_on_task.campaign_id:
-            raise ValidationError({"depends_on_task_id": "Tasks must belong to the same campaign."})
+            raise ValidationError({"depends_on_task_id": ("Tasks must belong to the same campaign.")})
 
-        campaign = CampaignRevisionService.lock_campaign(workspace=workspace, campaign_id=task.campaign_id)
-
-        if TaskDependency.objects.filter(task_id=task_id, depends_on_task_id=depends_on_task_id).exists():
+        if TaskDependency.objects.filter(task=task, depends_on_task=depends_on_task,).exists():
             raise ValidationError({"depends_on_task_id": "This dependency already exists."})
 
-        graph = TaskDependencySelector.get_campaign_graph(campaign_id=task.campaign_id)
-        if cls.creates_cycle(graph=graph, task_id=task_id, depends_on_task_id=depends_on_task_id):
+        graph = TaskDependencySelector.get_campaign_graph(campaign_id=campaign.id,)
+
+        if cls.creates_cycle(graph=graph, task_id=task.id, depends_on_task_id=depends_on_task.id,):
             raise ValidationError({"depends_on_task_id": "Circular dependency detected."})
 
-        dependency = TaskDependency(task=task, depends_on_task=depends_on_task, lag_hours=lag_hours)
+        dependency = TaskDependency(task=task, depends_on_task=depends_on_task, lag_hours=lag_hours,)
+
         try:
             dependency.full_clean()
         except DjangoValidationError as exc:
-            raise ValidationError(exc.message_dict if hasattr(exc, "message_dict") else exc.messages)
+            raise ValidationError(
+                exc.message_dict
+                if hasattr(exc, "message_dict")
+                else exc.messages
+            )
 
         dependency.save()
+
         TaskActivityService.record(
-            task=task, actor=actor, action=TaskActivityType.DEPENDENCY_ADDED,
+            task=task,
+            actor=actor,
+            action=TaskActivityType.DEPENDENCY_ADDED,
             metadata={
                 "dependency_id": str(dependency.id),
-                "depends_on_task_id": str(depends_on_task_id),
+                "depends_on_task_id": str(depends_on_task.id),
                 "lag_hours": str(dependency.lag_hours),
             },
         )
+
         CampaignRevisionService.increment(campaign=campaign)
+
         return dependency
 
     @staticmethod
     @transaction.atomic
-    def delete_dependency(*, workspace, task_id, dependency_id, actor):
-        dependency = TaskDependencySelector.get_dependency(workspace=workspace, task_id=task_id, dependency_id=dependency_id)
-        if dependency is None:
+    def delete_dependency(*, workspace, task_id, dependency_id, actor,):
+        campaign_id = Task.objects.filter(id=task_id, campaign__workspace=workspace, campaign__is_archived=False,).values_list("campaign_id", flat=True).first()
+
+        if campaign_id is None:
+            raise NotFound("Task not found.")
+
+        campaign = CampaignRevisionService.lock_campaign(workspace=workspace, campaign_id=campaign_id,)
+
+        dependency = TaskDependencySelector.get_dependency(workspace=workspace, task_id=task_id, dependency_id=dependency_id,)
+
+        if (dependency is None or dependency.task.campaign_id != campaign.id):
             raise NotFound("Dependency not found.")
 
-        campaign = CampaignRevisionService.lock_campaign(workspace=workspace, campaign_id=dependency.task.campaign_id)
-
         TaskActivityService.record(
-            task=dependency.task, actor=actor, action=TaskActivityType.DEPENDENCY_REMOVED,
+            task=dependency.task,
+            actor=actor,
+            action=TaskActivityType.DEPENDENCY_REMOVED,
             metadata={
                 "dependency_id": str(dependency.id),
                 "depends_on_task_id": str(dependency.depends_on_task_id),
             },
         )
+
         dependency.delete()
+
         CampaignRevisionService.increment(campaign=campaign)
 
 
@@ -369,9 +400,7 @@ class TaskStatusService:
             TaskStatus.CHANGES_REQUESTED,
         }
         if not approval_context and (task.status == TaskStatus.IN_REVIEW or new_status in approval_statuses):
-            raise ValidationError({
-                "status": "Approval-related transitions must use the Approval API."
-            })
+            raise ValidationError({"status": "Approval-related transitions must use the Approval API."})
 
         if new_status == TaskStatus.IN_PROGRESS:
             cls.validate_dependencies(task=task)
