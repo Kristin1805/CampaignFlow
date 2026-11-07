@@ -60,24 +60,20 @@ class SkillSelector:
 class WorkspaceMemberSelector:
 
     @staticmethod
-    def get_by_user_and_workspace(*, user: User, workspace: Workspace,) -> WorkspaceMember | None:
-        return (
-            WorkspaceMember.objects
-            .filter(user=user, workspace=workspace)
-            .first()
-        )
+    def get_by_user_and_workspace(*, user: User, workspace: Workspace) -> WorkspaceMember | None:
+        return WorkspaceMember.objects.filter(user=user, workspace=workspace).first()
 
     @staticmethod
     def get_by_id(*, workspace: Workspace, member_id: UUID) -> WorkspaceMember | None:
         return WorkspaceMember.objects.filter(id=member_id, workspace=workspace).first()
 
     @staticmethod
-    def get_workspace_members(*,workspace: Workspace,):
-        return (WorkspaceMember.objects.filter(workspace=workspace).select_related("user", "workspace").order_by("user__email"))
+    def get_workspace_members(*, workspace: Workspace) -> QuerySet[WorkspaceMember]:
+        return WorkspaceMember.objects.filter(workspace=workspace).select_related("user", "workspace").order_by("user__email")
 
     @staticmethod
-    def get_user_workspaces(*, user: User):
-        return (Workspace.objects.filter(members__user=user).distinct().order_by("name"))
+    def get_user_workspaces(*, user: User) -> QuerySet[Workspace]:
+        return Workspace.objects.filter(members__user=user).distinct().order_by("name")
 
     @staticmethod
     def get_member_data(member: WorkspaceMember) -> dict:
@@ -106,15 +102,19 @@ class WorkspaceResult:
 
 class WorkspaceSelector:
     @staticmethod
-    def get_user_workspaces(*, user: User,) -> QuerySet[WorkspaceMember]:
-        return (WorkspaceMember.objects.filter(user=user).select_related("workspace").order_by("workspace__name"))
+    def get_user_workspaces(*, user: User) -> QuerySet[WorkspaceMember]:
+        return WorkspaceMember.objects.filter(user=user).select_related("workspace").order_by("workspace__name")
 
     @staticmethod
-    def get_membership(*, workspace_id: UUID, user: User,) -> WorkspaceMember | None:
-        return (WorkspaceMember.objects.filter(workspace_id=workspace_id, user=user,).select_related("workspace").first())
+    def get_membership(*, workspace_id: UUID, user: User) -> WorkspaceMember | None:
+        return WorkspaceMember.objects.filter(workspace_id=workspace_id, user=user).select_related("workspace").first()
 
     @staticmethod
-    def serialize_workspace(*,workspace: Workspace, role: str,) -> WorkspaceResult:
+    def get_workspace_for_user(*, workspace_id: UUID, user: User) -> Workspace | None:
+        return Workspace.objects.filter(id=workspace_id, members__user=user).first()
+
+    @staticmethod
+    def serialize_workspace(*, workspace: Workspace, role: str) -> WorkspaceResult:
         return WorkspaceResult(
             id=workspace.id,
             name=workspace.name,
@@ -141,7 +141,7 @@ class WorkspaceInvitationResult:
 
 class WorkspaceInvitationSelector:
     @staticmethod
-    def get_workspace_invitations(*, workspace: Workspace):
+    def get_workspace_invitations(*, workspace: Workspace) -> QuerySet[WorkspaceInvitation]:
         return WorkspaceInvitation.objects.filter(workspace=workspace).select_related("invited_by").order_by("-created_at")
 
     @staticmethod
@@ -164,3 +164,36 @@ class WorkspaceInvitationSelector:
             expires_at=invitation.expires_at,
             created_at=invitation.created_at,
         )
+
+
+class SkillSelector:
+    @staticmethod
+    def get_all_skills() -> QuerySet[Skill]:
+        return Skill.objects.all().order_by("name")
+
+    @staticmethod
+    def get_by_code(*, code: str) -> Skill | None:
+        return Skill.objects.filter(code=code).first()
+
+    @staticmethod
+    def get_member_skills(*, workspace_member: WorkspaceMember) -> QuerySet[WorkspaceMemberSkill]:
+        return WorkspaceMemberSkill.objects.filter(workspace_member=workspace_member).select_related("skill").order_by("skill__name")
+
+    @staticmethod
+    def get_members_by_skill(*, workspace: Workspace, skill: Skill) -> QuerySet[WorkspaceMember]:
+        return WorkspaceMember.objects.filter(workspace=workspace, member_skills__skill=skill).select_related("user").distinct()
+
+    @staticmethod
+    def get_members_by_skill_code(*, workspace: Workspace, skill_code: str) -> QuerySet[WorkspaceMember]:
+        return WorkspaceMember.objects.filter(workspace=workspace, member_skills__skill__code=skill_code).select_related("user").distinct()
+
+    @staticmethod
+    def get_member_skill_data(member_skill: WorkspaceMemberSkill) -> dict:
+        return {
+            "id": str(member_skill.id),
+            "workspace_member_id": str(member_skill.workspace_member_id),
+            "skill_id": str(member_skill.skill_id),
+            "skill_code": member_skill.skill.code,
+            "skill_name": member_skill.skill.name,
+            "created_at": member_skill.created_at,
+        }

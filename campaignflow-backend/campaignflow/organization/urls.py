@@ -5,7 +5,7 @@ from campaignflow.organization.apis import (
     WorkspaceListCreateApi,
     WorkspaceInvitationListCreateApi,
     WorkspaceInvitationAcceptApi,
-    WorkspaceInvitationRevokeApi, WorkspaceMemberListApi,
+    WorkspaceInvitationRevokeApi, WorkspaceMemberListApi, WorkspaceMemberDetailApi,
 )
 
 urlpatterns = [
