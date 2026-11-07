@@ -143,6 +143,13 @@ class TaskService:
         if task is None:
             raise NotFound("Task not found.")
 
+        from campaignflow.approvals.models import TaskApproval, ApprovalStatus
+
+        if TaskApproval.objects.filter(task=task, status=ApprovalStatus.PENDING).exists():
+            raise ValidationError({
+                "approval": "Cannot delete a task with a pending approval. Cancel the approval first."
+            })
+
         task.delete()
 
 
@@ -266,7 +273,7 @@ class TaskStatusService:
 
     @classmethod
     @transaction.atomic
-    def change_status(cls, *, workspace, task_id, new_status, changed_by):
+    def change_status(cls, *, workspace, task_id, new_status, changed_by, approval_context=False):
         task = TaskStatusSelector.get_task(workspace=workspace, task_id=task_id, for_update=True)
         if task is None:
             raise NotFound("Task not found.")
@@ -278,6 +285,16 @@ class TaskStatusService:
         if new_status not in allowed:
             raise ValidationError({
                 "status": f"Cannot change task status from '{task.status}' to '{new_status}'."
+            })
+
+        approval_statuses = {
+            TaskStatus.IN_REVIEW,
+            TaskStatus.APPROVED,
+            TaskStatus.CHANGES_REQUESTED,
+        }
+        if not approval_context and (task.status == TaskStatus.IN_REVIEW or new_status in approval_statuses):
+            raise ValidationError({
+                "status": "Approval-related transitions must use the Approval API."
             })
 
         if new_status == TaskStatus.IN_PROGRESS:
