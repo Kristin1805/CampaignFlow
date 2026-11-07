@@ -15,43 +15,43 @@ User = get_user_model()
 class SkillSelector:
 
     @staticmethod
-    def get_all_skills():
+    def get_all_skills() -> QuerySet[Skill]:
         return Skill.objects.all().order_by("name")
+
+    @staticmethod
+    def get_by_id(*, skill_id: UUID) -> Skill | None:
+        return Skill.objects.filter(id=skill_id).first()
 
     @staticmethod
     def get_by_code(*, code: str) -> Skill | None:
         return Skill.objects.filter(code=code).first()
 
     @staticmethod
-    def get_member_skills(*, workspace_member: WorkspaceMember):
-        return (Skill.objects.filter(member_skills__workspace_member=workspace_member).order_by("name"))
+    def get_member_skills(*, workspace_member: WorkspaceMember) -> QuerySet[WorkspaceMemberSkill]:
+        return WorkspaceMemberSkill.objects.filter(workspace_member=workspace_member).select_related("skill").order_by("skill__name")
 
     @staticmethod
-    def get_members_by_skill(*, workspace, skill: Skill):
-        return (
-            WorkspaceMember.objects
-            .filter(workspace=workspace, member_skills__skill=skill,)
-            .select_related("user", "workspace")
-            .distinct()
-            .order_by("user__email")
-        )
+    def get_member_skill(*, workspace_member: WorkspaceMember, skill: Skill) -> WorkspaceMemberSkill | None:
+        return WorkspaceMemberSkill.objects.filter(workspace_member=workspace_member, skill=skill).select_related("skill").first()
 
     @staticmethod
-    def get_members_by_skill_code(*, workspace, skill_code: str):
-        return (
-            WorkspaceMember.objects
-            .filter(workspace=workspace, member_skills__skill__code=skill_code,)
-            .select_related("user", "workspace")
-            .distinct()
-            .order_by("user__email")
-        )
+    def get_members_by_skill(*, workspace: Workspace, skill: Skill) -> QuerySet[WorkspaceMember]:
+        return WorkspaceMember.objects.filter(workspace=workspace, member_skills__skill=skill).select_related("user").distinct()
+
+    @staticmethod
+    def get_members_by_skill_code(*, workspace: Workspace, skill_code: str) -> QuerySet[WorkspaceMember]:
+        return WorkspaceMember.objects.filter(workspace=workspace, member_skills__skill__code=skill_code).select_related("user").distinct()
+
+    @staticmethod
+    def get_skill_data(skill: Skill) -> dict:
+        return {"id": skill.id, "code": skill.code, "name": skill.name}
 
     @staticmethod
     def get_member_skill_data(member_skill: WorkspaceMemberSkill) -> dict:
         return {
-            "id": str(member_skill.id),
-            "workspace_member_id": str(member_skill.workspace_member_id),
-            "skill_id": str(member_skill.skill_id),
+            "id": member_skill.id,
+            "workspace_member_id": member_skill.workspace_member_id,
+            "skill_id": member_skill.skill_id,
             "skill_code": member_skill.skill.code,
             "skill_name": member_skill.skill.name,
         }
