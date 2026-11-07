@@ -2,7 +2,8 @@
 from django.urls import path
 
 from campaignflow.tasks.apis import CampaignTasksApi, TaskDetailApi, TaskDependencyDeleteApi, \
-    TaskDependencyListCreateApi, TaskStatusUpdateApi, TaskStatusHistoryApi
+    TaskDependencyListCreateApi, TaskStatusUpdateApi, TaskStatusHistoryApi, TaskCommentListCreateApi, \
+    TaskActivityListApi, TaskCommentDetailApi
 
 urlpatterns = [
     path("workspaces/<uuid:workspace_id>/campaigns/<uuid:campaign_id>/tasks/", CampaignTasksApi.as_view(), name="campaign-tasks",),
@@ -14,4 +15,8 @@ urlpatterns = [
 
     path("workspaces/<uuid:workspace_id>/tasks/<uuid:task_id>/status/", TaskStatusUpdateApi.as_view(), name="task-status-update",),
     path("workspaces/<uuid:workspace_id>/tasks/<uuid:task_id>/status-history/", TaskStatusHistoryApi.as_view(), name="task-status-history",),
+
+    path("workspaces/<uuid:workspace_id>/tasks/<uuid:task_id>/comments/", TaskCommentListCreateApi.as_view(), name="task-comment-list-create",),
+    path("workspaces/<uuid:workspace_id>/tasks/<uuid:task_id>/comments/<uuid:comment_id>/", TaskCommentDetailApi.as_view(), name="task-comment-detail",),
+    path("workspaces/<uuid:workspace_id>/tasks/<uuid:task_id>/activity/", TaskActivityListApi.as_view(), name="task-activity-list",),
 ]
