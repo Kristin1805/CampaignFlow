@@ -222,3 +222,12 @@ DEFAULT_FROM_EMAIL = "CampaignFlow <noreply@campaignflow.local>"
 EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
 
 PRIVATE_MEDIA_ROOT = BASE_DIR / "private_media"
+
+
+import os
+
+CFENGINE_PATH = os.getenv("CFENGINE_PATH", "cfengine")
+CFENGINE_TIMEOUT = int(os.getenv("CFENGINE_TIMEOUT", "10"))
+
+CFENGINE_INPUT_SCHEMA = BASE_DIR / "contracts" / "optimize.input.schema.json"
+CFENGINE_OUTPUT_SCHEMA = BASE_DIR / "contracts" / "optimize.output.schema.json"

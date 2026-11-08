@@ -22,4 +22,5 @@ urlpatterns = [
     path("api/auth/",  include("campaignflow.authentication.urls"),),
     path("api/", include("campaignflow.campaigns.urls")),
     path("api/", include("campaignflow.approvals.urls")),
+    path("api/", include("campaignflow.optimizer.urls")),
 ]

@@ -72,6 +72,33 @@ class TaskWorkloadSelector:
             for row in rows
         }
 
+    @classmethod
+    def get_optimizer_busy_hours(cls, *, workspace, campaign, start_date: date, end_date: date, member_ids=None):
+        queryset = Task.objects.filter(
+            campaign__workspace=workspace,
+            campaign__is_archived=False,
+            assignee__isnull=False,
+            planned_start__date__lte=end_date,
+            planned_end__date__gte=start_date,
+        ).exclude(
+            status__in=cls.EXCLUDED_STATUSES
+        ).exclude(
+            campaign=campaign
+        )
+
+        if member_ids is not None:
+            queryset = queryset.filter(assignee_id__in=member_ids)
+
+        rows = queryset.values("assignee_id").annotate(
+            busy_hours=Coalesce(
+                Sum("estimated_hours"),
+                Value(Decimal("0.00")),
+                output_field=DecimalField(max_digits=12, decimal_places=2),
+            )
+        )
+
+        return {row["assignee_id"]: row["busy_hours"] for row in rows}
+
 
 class TaskDependencySelector:
     @staticmethod
@@ -82,7 +109,8 @@ class TaskDependencySelector:
 
     @staticmethod
     def get_dependencies(*, workspace, task_id):
-        return TaskDependency.objects.filter(task_id=task_id, task__campaign__workspace=workspace, task__campaign__is_archived=False
+        return TaskDependency.objects.filter(
+            task_id=task_id, task__campaign__workspace=workspace, task__campaign__is_archived=False
         ).select_related("task", "depends_on_task").order_by("created_at", "id")
 
     @staticmethod
@@ -107,7 +135,7 @@ class TaskDependencySelector:
 class TaskStatusSelector:
     @staticmethod
     def get_task(*, workspace, task_id, for_update=False):
-        queryset = Task.objects.filter(id=task_id, campaign__workspace=workspace, campaign__is_archived=False,)
+        queryset = Task.objects.filter(id=task_id, campaign__workspace=workspace, campaign__is_archived=False)
 
         if for_update:
             queryset = queryset.select_for_update(of=("self",))
@@ -119,12 +147,15 @@ class TaskStatusSelector:
 
     @staticmethod
     def get_status_history(*, workspace, task_id):
-        return TaskStatusHistory.objects.filter(task_id=task_id, task__campaign__workspace=workspace,).select_related("changed_by").order_by("created_at", "id")
+        return TaskStatusHistory.objects.filter(
+            task_id=task_id, task__campaign__workspace=workspace,
+        ).select_related("changed_by").order_by("created_at", "id")
 
     @staticmethod
     def get_incomplete_dependencies(*, task):
-        return TaskDependency.objects.filter(task=task).exclude(depends_on_task__status=TaskStatus.COMPLETED).select_related("depends_on_task").order_by("created_at", "id")
-
+        return TaskDependency.objects.filter(task=task).exclude(
+            depends_on_task__status=TaskStatus.COMPLETED
+        ).select_related("depends_on_task").order_by("created_at", "id")
 
 
 class TaskCommentSelector:

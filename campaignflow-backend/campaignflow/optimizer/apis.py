@@ -1,11 +1,12 @@
-
 from rest_framework import serializers, status
+from rest_framework.exceptions import NotFound, ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from campaignflow.optimizer.models import OptimizationRun
-from campaignflow.optimizer.services import apply_optimization_run
+from campaignflow.optimizer.models import OptimizationRun, Risk
+from campaignflow.optimizer.selectors import OptimizerSelector
+from campaignflow.optimizer.services import OptimizerService, apply_optimization_run
 
 
 class OptimizationTaskEditSerializer(serializers.Serializer):
@@ -21,13 +22,17 @@ class OptimizationTaskEditSerializer(serializers.Serializer):
 
     def validate(self, attrs):
         if "due_at" in attrs and "must_finish_by" in attrs:
-            raise serializers.ValidationError({"due_at": "Provide either due_at or must_finish_by, not both."})
+            raise serializers.ValidationError({
+                "due_at": "Provide either due_at or must_finish_by, not both."
+            })
 
         planned_start = attrs.get("planned_start")
         planned_end = attrs.get("planned_end")
 
         if planned_start is not None and planned_end is not None and planned_start > planned_end:
-            raise serializers.ValidationError({"planned_end": "Planned end must be on or after planned start."})
+            raise serializers.ValidationError({
+                "planned_end": "Planned end must be on or after planned start."
+            })
 
         return attrs
 
@@ -82,9 +87,67 @@ class OptimizationApplyApi(APIView):
                 for item in edits
             ]
 
-        optimization_run = apply_optimization_run(run=run_id, user=request.user, edits=edits)
+        optimization_run = apply_optimization_run(
+            run=run_id,
+            user=request.user,
+            edits=edits,
+        )
+
         optimization_run.refresh_from_db()
         optimization_run.campaign.refresh_from_db(fields=["revision"])
 
         output_serializer = OptimizationApplyOutputSerializer(optimization_run)
         return Response(output_serializer.data, status=status.HTTP_200_OK)
+
+
+class OptimizationPreviewOutputSerializer(serializers.Serializer):
+    run_id = serializers.UUIDField()
+    campaign_id = serializers.UUIDField()
+    campaign_revision = serializers.IntegerField()
+    feasible = serializers.BooleanField()
+    makespan_hours = serializers.DecimalField(max_digits=12, decimal_places=2, allow_null=True)
+    risk = serializers.ChoiceField(choices=Risk.choices)
+    duration_ms = serializers.IntegerField(allow_null=True)
+    engine_version = serializers.CharField()
+    output = serializers.JSONField()
+    diff = serializers.ListField(child=serializers.DictField())
+
+
+class OptimizationPreviewApi(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, campaign_id):
+        workspace = getattr(request, "workspace", None)
+
+        if workspace is None:
+            raise ValidationError({
+                "workspace": "Workspace context is required."
+            })
+
+        campaign = OptimizerSelector.get_campaign(
+            workspace=workspace,
+            campaign_id=campaign_id,
+        )
+
+        if campaign is None:
+            raise NotFound("Campaign not found.")
+
+        optimization_run, diff = OptimizerService.preview(campaign=campaign, user=request.user,)
+
+        output = optimization_run.output_json
+
+        data = {
+            "run_id": optimization_run.id,
+            "campaign_id": campaign.id,
+            "campaign_revision": optimization_run.campaign_revision,
+            "feasible": optimization_run.feasible,
+            "makespan_hours": optimization_run.makespan_hours,
+            "risk": optimization_run.risk,
+            "duration_ms": optimization_run.duration_ms,
+            "engine_version": optimization_run.engine_version,
+            "output": output,
+            "diff": diff,
+        }
+
+        serializer = OptimizationPreviewOutputSerializer(instance=data)
+        return Response(serializer.data, status=status.HTTP_200_OK)
