@@ -6,6 +6,7 @@
   /* Text */
   --color-text: #070719;
   --color-text-muted: #6b6f80;
+  --color-on-primary: #ffffff; /* text/icons on primary background */
 
   /* Bg-colors and frames */
   --color-background: #f7f7fb; /* page bg-color */

@@ -1,1 +1,18 @@
+.button{
+    border-radius: var(--radius-md);
+    padding: var(--space-2) var(--space-4);
+    cursor: pointer;
+    border: 1px solid transparent;
+    font-weight: var(--font-weight-medium);
+}
 
+.button--primary{
+    background: var(--color-primary);
+    color: var(--color-on-primary);
+}
+
+.button--secondary{
+    background: var(--color-surface);
+    color: var(--color-text);
+    border-color: var(--color-border);
+}
