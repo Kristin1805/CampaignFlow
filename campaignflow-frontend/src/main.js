@@ -10,6 +10,7 @@ window.addEventListener('popstate', renderCurrentPage);
 window.addEventListener('click', function(event) {
     const link = event.target.closest('a');
     if (!link) return;
+    if (link.origin !== window.location.origin) return;
     event.preventDefault();
     const path = link.getAttribute('href');
     navigateTo(path);

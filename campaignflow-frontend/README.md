@@ -3,7 +3,7 @@ Frontend for CampaignFlow, built with Vite and vanilla JavaScript (HTML/CSS).
 It communicates with the Django backend API.
 
 ## Requirements
-- Node.js 24+ (провери с `node -v`)
+- Node.js 24+ (check with `node -v`)
 
 ## Setup
 1. Clone the repository:
@@ -51,3 +51,6 @@ at `http://127.0.0.1:8000` (configured in `vite.config.js`).
 
 The Django server must be running for API requests to work:
 `python manage.py runserver`
+
+## Conventions
+See [CONVENTIONS.md](./CONVENTIONS.md) for naming, structure and code style rules.
