@@ -87,23 +87,10 @@ class OptimizerSelector:
             for period in member.time_off_periods.all()
         ]
 
-    # CF-054: Optimization history
-
     @staticmethod
-    def get_optimization_runs(
-        *,
-        workspace,
-        campaign_id,
-        risk=None,
-        feasible=None,
-        applied=None,
-    ):
+    def get_optimization_runs(*, workspace, campaign_id, risk=None, feasible=None, applied=None,):
         queryset = (
-            OptimizationRun.objects.filter(
-                campaign_id=campaign_id,
-                campaign__workspace=workspace,
-                campaign__is_archived=False,
-            )
+            OptimizationRun.objects.filter(campaign_id=campaign_id, campaign__workspace=workspace, campaign__is_archived=False,)
             .select_related("campaign","requested_by",)
         )
 
@@ -121,11 +108,16 @@ class OptimizerSelector:
     @staticmethod
     def get_optimization_run(*, workspace, run_id,):
         return (
-            OptimizationRun.objects.filter(
-                id=run_id,
-                campaign__workspace=workspace,
-                campaign__is_archived=False,
-            )
+            OptimizationRun.objects.filter(id=run_id, campaign__workspace=workspace,campaign__is_archived=False,)
             .select_related("campaign", "campaign__workspace", "requested_by",)
+            .first()
+        )
+
+    @staticmethod
+    def get_latest_applied_run(*, campaign):
+        return (
+            OptimizationRun.objects.filter(campaign=campaign, campaign__is_archived=False, feasible=True, applied_at__isnull=False,)
+            .select_related("campaign", "requested_by",)
+            .order_by("-applied_at", "-created_at", "-id",)
             .first()
         )

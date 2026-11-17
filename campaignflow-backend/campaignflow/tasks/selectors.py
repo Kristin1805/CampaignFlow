@@ -353,3 +353,31 @@ class TaskActivitySelector:
             .select_related("actor")
             .order_by("-created_at", "-id")
         )
+
+
+class CampaignScheduleSelector:
+    @staticmethod
+    def get_tasks(*, campaign, assignee_id=None, status=None, is_critical=None,):
+        queryset = (
+            Task.objects.filter(campaign=campaign,campaign__is_archived=False,)
+            .select_related("assignee", "assignee__user", "required_skill",)
+        )
+
+        if assignee_id is not None:
+            queryset = queryset.filter(assignee_id=assignee_id,)
+
+        if status is not None:
+            queryset = queryset.filter(status=status,)
+
+        if is_critical is not None:
+            queryset = queryset.filter(is_critical=is_critical,)
+
+        return queryset.order_by("planned_start", "planned_end", "id",)
+
+    @staticmethod
+    def get_dependencies(*, campaign):
+        return (
+            TaskDependency.objects.filter(task__campaign=campaign, depends_on_task__campaign=campaign, task__campaign__is_archived=False,)
+            .select_related("task", "depends_on_task",)
+            .order_by("task_id", "depends_on_task_id",)
+        )

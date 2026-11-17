@@ -14,8 +14,9 @@ from campaignflow.optimizer.selectors import OptimizerSelector
 from campaignflow.optimizer.services import (
     OptimizationHistoryService,
     OptimizerService,
-    apply_optimization_run,
+    apply_optimization_run, CampaignScheduleService,
 )
+from campaignflow.tasks.enums import TaskStatus
 
 
 class StrictSerializer(serializers.Serializer):
@@ -121,9 +122,7 @@ class OptimizationApplyOutputSerializer(serializers.ModelSerializer):
         return obj.applied_at is not None
 
 
-class OptimizationPreviewOutputSerializer(
-    serializers.Serializer
-):
+class OptimizationPreviewOutputSerializer(serializers.Serializer):
     run_id = serializers.UUIDField()
     campaign_id = serializers.UUIDField()
     campaign_revision = serializers.IntegerField()
@@ -141,61 +140,29 @@ class OptimizationPreviewOutputSerializer(
 
 class OptimizationHistoryFilterSerializer(StrictSerializer):
 
-    risk = serializers.ChoiceField(
-        choices=Risk.choices,
-        required=False,
-    )
+    risk = serializers.ChoiceField(choices=Risk.choices, required=False,)
 
-    feasible = serializers.BooleanField(
-        required=False,
-    )
+    feasible = serializers.BooleanField(required=False,)
 
-    applied = serializers.BooleanField(
-        required=False,
-    )
+    applied = serializers.BooleanField(required=False,)
 
-    page = serializers.IntegerField(
-        min_value=1,
-        required=False,
-    )
+    page = serializers.IntegerField(min_value=1, required=False,)
 
-    page_size = serializers.IntegerField(
-        min_value=1,
-        max_value=100,
-        required=False,
-    )
+    page_size = serializers.IntegerField(min_value=1, max_value=100, required=False,)
 
 
-# CF-054: History serializers
-
-
-class OptimizationRequestedBySerializer(
-    serializers.Serializer
-):
-
+class OptimizationRequestedBySerializer(serializers.Serializer):
     id = serializers.ReadOnlyField()
-
-    email = serializers.EmailField(
-        read_only=True,
-    )
+    email = serializers.EmailField(read_only=True,)
 
 
-class OptimizationHistoryOutputSerializer(
-    serializers.ModelSerializer
-):
+class OptimizationHistoryOutputSerializer(serializers.ModelSerializer):
 
-    run_id = serializers.UUIDField(
-        source="id",
-        read_only=True,
-    )
+    run_id = serializers.UUIDField(source="id", read_only=True,)
 
-    campaign_id = serializers.UUIDField(
-        read_only=True,
-    )
+    campaign_id = serializers.UUIDField(read_only=True,)
 
-    requested_by = OptimizationRequestedBySerializer(
-        read_only=True,
-    )
+    requested_by = OptimizationRequestedBySerializer(read_only=True,)
 
     applied = serializers.SerializerMethodField()
 
@@ -220,22 +187,12 @@ class OptimizationHistoryOutputSerializer(
         read_only_fields = fields
 
     def get_applied(self, obj):
-        return OptimizationHistoryService.is_applied(
-            optimization_run=obj,
-        )
+        return OptimizationHistoryService.is_applied(optimization_run=obj,)
 
 
-# CF-054: Details serializer
+class OptimizationDetailsOutputSerializer(OptimizationHistoryOutputSerializer):
 
-
-class OptimizationDetailsOutputSerializer(
-    OptimizationHistoryOutputSerializer
-):
-
-    current_campaign_revision = serializers.IntegerField(
-        source="campaign.revision",
-        read_only=True,
-    )
+    current_campaign_revision = serializers.IntegerField(source="campaign.revision", read_only=True,)
 
     stale = serializers.SerializerMethodField()
 
@@ -308,10 +265,7 @@ class OptimizationPreviewApi(APIView):
                 "workspace": "Workspace context is required."
             })
 
-        campaign = OptimizerSelector.get_campaign(
-            workspace=workspace,
-            campaign_id=campaign_id,
-        )
+        campaign = OptimizerSelector.get_campaign(workspace=workspace, campaign_id=campaign_id,)
 
         if campaign is None:
             raise NotFound("Campaign not found.")
@@ -420,11 +374,7 @@ class OptimizationHistoryApi(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, campaign_id):
-        workspace = getattr(
-            request,
-            "workspace",
-            None,
-        )
+        workspace = getattr(request, "workspace",None,)
 
         if workspace is None:
             raise ValidationError({
@@ -435,9 +385,7 @@ class OptimizationHistoryApi(APIView):
             data=request.query_params.dict(),
         )
 
-        filter_serializer.is_valid(
-            raise_exception=True,
-        )
+        filter_serializer.is_valid(raise_exception=True,)
 
         queryset = OptimizationHistoryService.get_history(
             workspace=workspace,
@@ -448,48 +396,229 @@ class OptimizationHistoryApi(APIView):
 
         paginator = OptimizationHistoryPagination()
 
-        page = paginator.paginate_queryset(
-            queryset,
-            request,
-            view=self,
-        )
+        page = paginator.paginate_queryset(queryset, request, view=self,)
 
-        serializer = OptimizationHistoryOutputSerializer(
-            instance=page,
-            many=True,
-        )
+        serializer = OptimizationHistoryOutputSerializer(instance=page, many=True,)
 
-        return paginator.get_paginated_response(
-            serializer.data,
-        )
+        return paginator.get_paginated_response(serializer.data,)
 
 class OptimizationDetailsApi(APIView):
 
     permission_classes = [IsAuthenticated]
 
     def get(self, request, run_id):
-        workspace = getattr(
-            request,
-            "workspace",
-            None,
-        )
+        workspace = getattr(request, "workspace", None,)
 
         if workspace is None:
             raise ValidationError({
                 "workspace": "Workspace context is required."
             })
 
-        optimization_run = OptimizationHistoryService.get_details(
+        optimization_run = OptimizationHistoryService.get_details(workspace=workspace, run_id=run_id, user=request.user,)
+
+        serializer = OptimizationDetailsOutputSerializer(instance=optimization_run,)
+
+        return Response(serializer.data, status=status.HTTP_200_OK,)
+
+
+
+class CampaignScheduleFilterSerializer(serializers.Serializer):
+
+    assignee_id = serializers.UUIDField(required=False,)
+
+    status = serializers.ChoiceField(choices=TaskStatus.choices,required=False,)
+
+    is_critical = serializers.BooleanField(required=False,)
+
+    def to_internal_value(self, data):
+        unknown_fields = set(data) - set(self.fields)
+
+        if unknown_fields:
+            raise serializers.ValidationError({
+                field: "Unknown filter."
+                for field in sorted(unknown_fields)
+            })
+
+        return super().to_internal_value(data)
+
+
+
+class ScheduleAssigneeSerializer(serializers.Serializer):
+    id = serializers.UUIDField()
+
+    user_id = serializers.ReadOnlyField()
+
+    email = serializers.EmailField(source="user.email", read_only=True,)
+
+class CampaignScheduleTaskSerializer(serializers.Serializer):
+
+    id = serializers.UUIDField()
+
+    campaign_id = serializers.UUIDField()
+
+    title = serializers.CharField()
+
+    status = serializers.CharField()
+
+    priority = serializers.CharField()
+
+    assignee_id = serializers.UUIDField(allow_null=True,)
+
+    assignee = ScheduleAssigneeSerializer(allow_null=True, read_only=True,)
+
+    required_skill_id = serializers.UUIDField(allow_null=True,)
+
+    required_skill_code = serializers.CharField(source="required_skill.code", allow_null=True, read_only=True,)
+
+    estimated_hours = serializers.DecimalField(max_digits=10, decimal_places=2,)
+
+    actual_hours = serializers.DecimalField(max_digits=10, decimal_places=2,)
+
+    planned_start = serializers.DateTimeField(allow_null=True,)
+
+    planned_end = serializers.DateTimeField(allow_null=True,)
+
+    latest_start_at = serializers.DateTimeField(allow_null=True,)
+
+    due_at = serializers.DateTimeField(allow_null=True,)
+
+    slack_hours = serializers.DecimalField(max_digits=10, decimal_places=2, allow_null=True,)
+
+    is_critical = serializers.BooleanField()
+
+    is_scheduled = serializers.SerializerMethodField()
+
+    def get_is_scheduled(self, obj):
+        return CampaignScheduleService.is_task_scheduled(task=obj,)
+
+
+
+class CampaignScheduleDependencySerializer(serializers.Serializer):
+    id = serializers.UUIDField()
+
+    task_id = serializers.UUIDField()
+
+    depends_on_task_id = serializers.UUIDField()
+
+    lag_hours = serializers.DecimalField(max_digits=10, decimal_places=2,)
+
+
+
+class CampaignScheduleSummarySerializer(serializers.Serializer):
+
+    total_tasks = serializers.IntegerField()
+
+    scheduled_tasks = serializers.IntegerField()
+
+    unscheduled_tasks = serializers.IntegerField()
+
+    critical_tasks = serializers.IntegerField()
+
+    total_dependencies = serializers.IntegerField()
+
+
+
+class CampaignScheduleOutputSerializer(serializers.Serializer):
+
+    campaign_id = serializers.UUIDField()
+
+    campaign_revision = serializers.IntegerField()
+
+    launch_at = serializers.DateTimeField(allow_null=True,)
+
+    optimization_run_id = serializers.UUIDField(allow_null=True,)
+
+    optimization_stale = serializers.BooleanField()
+
+    schedule_start = serializers.DateTimeField(allow_null=True,)
+
+    schedule_end = serializers.DateTimeField(allow_null=True,)
+
+    summary = CampaignScheduleSummarySerializer()
+
+    tasks = CampaignScheduleTaskSerializer(many=True,)
+
+    dependencies = CampaignScheduleDependencySerializer(many=True,)
+
+    unscheduled_task_ids = serializers.ListField(child=serializers.UUIDField(),)
+
+
+
+class CampaignCriticalPathOutputSerializer(serializers.Serializer):
+
+    campaign_id = serializers.UUIDField()
+
+    campaign_revision = serializers.IntegerField()
+
+    optimization_run_id = serializers.UUIDField(allow_null=True,)
+
+    optimization_revision = serializers.IntegerField(allow_null=True,)
+
+    applied_at = serializers.DateTimeField(allow_null=True,)
+
+    available = serializers.BooleanField()
+
+    stale = serializers.BooleanField()
+
+    risk = serializers.ChoiceField(choices=Risk.choices, allow_null=True, allow_blank=True,)
+
+    makespan_hours = serializers.DecimalField(max_digits=12, decimal_places=2, allow_null=True,)
+
+    critical_path = serializers.ListField(child=serializers.UUIDField(),)
+
+    tasks = CampaignScheduleTaskSerializer(many=True,)
+
+    missing_task_ids = serializers.ListField(child=serializers.UUIDField(),)
+
+
+class CampaignScheduleApi(APIView):
+
+    permission_classes = [IsAuthenticated,]
+
+    def get(self, request, campaign_id):
+        workspace = getattr(request, "workspace", None,)
+
+        if workspace is None:
+            raise ValidationError({
+                "workspace": ("Workspace context is required.")
+            })
+
+        filter_serializer = (
+            CampaignScheduleFilterSerializer(data=request.query_params.dict(),)
+        )
+
+        filter_serializer.is_valid(raise_exception=True,)
+
+        result = CampaignScheduleService.get_schedule(
             workspace=workspace,
-            run_id=run_id,
+            campaign_id=campaign_id,
             user=request.user,
+            filters=filter_serializer.validated_data,
         )
 
-        serializer = OptimizationDetailsOutputSerializer(
-            instance=optimization_run,
-        )
+        serializer = CampaignScheduleOutputSerializer(instance=result,)
 
-        return Response(
-            serializer.data,
-            status=status.HTTP_200_OK,
-        )
+        return Response(serializer.data, status=status.HTTP_200_OK,)
+
+
+
+class CampaignCriticalPathApi(APIView):
+
+    permission_classes = [IsAuthenticated,]
+
+    def get(self, request, campaign_id):
+        workspace = getattr(request, "workspace", None,)
+
+        if workspace is None:
+            raise ValidationError({
+                "workspace": (
+                    "Workspace context is required."
+                )
+            })
+
+        result = CampaignScheduleService.get_critical_path(workspace=workspace, campaign_id=campaign_id, user=request.user,)
+
+        serializer = (CampaignCriticalPathOutputSerializer(instance=result,))
+
+        return Response(serializer.data,status=status.HTTP_200_OK,)
+

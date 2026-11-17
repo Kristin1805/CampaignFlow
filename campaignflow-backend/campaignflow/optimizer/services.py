@@ -3,21 +3,22 @@ import logging
 import subprocess
 import time
 import uuid
+
 from collections import defaultdict
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from django.conf import settings
-from jsonschema import Draft202012Validator, FormatChecker
-from jsonschema.exceptions import SchemaError
-
 from django.db import transaction
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
+
+from jsonschema import Draft202012Validator, FormatChecker
+from jsonschema.exceptions import SchemaError
+
 from rest_framework.exceptions import (
-    APIException,
     NotFound,
     PermissionDenied,
     ValidationError,
@@ -26,53 +27,24 @@ from rest_framework.exceptions import (
 from campaignflow.campaigns.models import Campaign
 from campaignflow.organization.models import WorkspaceMember
 from campaignflow.optimizer.models import OptimizationRun
+from campaignflow.optimizer.selectors import OptimizerSelector
+from campaignflow.optimizer.exceptions import (
+    OptimizationConflict,
+    OptimizerTimeout,
+    OptimizerInternalError,
+    OptimizerInvalidInput,
+    OptimizerInfeasible,
+    OptimizerDependencyCycle,
+)
 from campaignflow.tasks.models import Task, TaskActivityType
 from campaignflow.tasks.services import TaskActivityService
-from campaignflow.optimizer.selectors import OptimizerSelector
 from campaignflow.tasks.enums import TaskPriority, TaskStatus
-from campaignflow.tasks.selectors import TaskWorkloadSelector
+from campaignflow.tasks.selectors import (
+    TaskWorkloadSelector,
+    CampaignScheduleSelector,
+)
 
 logger = logging.getLogger(__name__)
-
-
-class OptimizationConflict(APIException):
-    status_code = 409
-    default_detail = "The optimization plan is stale."
-    default_code = "optimization_conflict"
-
-
-class OptimizerTimeout(APIException):
-    status_code = 503
-    default_code = "optimizer_timeout"
-    default_detail = "Optimization engine timed out."
-
-
-class OptimizerInternalError(APIException):
-    status_code = 500
-    default_code = "optimizer_internal_error"
-    default_detail = "Optimization engine failed."
-
-
-class OptimizerInvalidInput(OptimizerInternalError):
-    default_code = "invalid_optimizer_input"
-
-
-class OptimizerInfeasible(APIException):
-    status_code = 422
-    default_code = "optimizer_infeasible"
-    default_detail = "No feasible optimization plan was found."
-
-
-class OptimizerDependencyCycle(APIException):
-    status_code = 422
-    default_code = "dependency_cycle"
-
-    def __init__(self, *, cycle=None, message=None):
-        super().__init__({
-            "code": "dependency_cycle",
-            "message": message or "Task dependency cycle detected.",
-            "cycle": cycle or [],
-        })
 
 
 class OptimizerService:
@@ -763,12 +735,7 @@ class OptimizationHistoryService:
         )
 
     @staticmethod
-    def get_details(
-        *,
-        workspace,
-        run_id,
-        user,
-    ):
+    def get_details(*, workspace, run_id,user,):
         optimization_run = OptimizerSelector.get_optimization_run(workspace=workspace, run_id=run_id,)
 
         if optimization_run is None:
@@ -788,6 +755,174 @@ class OptimizationHistoryService:
             return False
 
         return (optimization_run.campaign_revision != optimization_run.campaign.revision)
+
+
+
+class CampaignScheduleService:
+
+    @staticmethod
+    def get_campaign(*, workspace, campaign_id, user,):
+        campaign = OptimizerSelector.get_campaign(workspace=workspace, campaign_id=campaign_id,)
+
+        if campaign is None:
+            raise NotFound("Campaign not found.")
+
+        membership = WorkspaceMember.objects.filter(
+            workspace=campaign.workspace,
+            user=user,
+            user__is_active=True,
+        ).first()
+
+        if membership is None:
+            raise NotFound("Campaign not found.")
+
+        if membership.role not in {
+            WorkspaceMember.Role.ADMIN,
+            WorkspaceMember.Role.MANAGER,
+        }:
+            raise PermissionDenied("You cannot access the campaign schedule.")
+
+        return campaign
+
+    @staticmethod
+    def is_task_scheduled(*, task):
+        return (
+            task.planned_start is not None
+            and task.planned_end is not None
+            and task.planned_start <= task.planned_end
+        )
+
+    @staticmethod
+    def is_optimization_stale(*, campaign,optimization_run,):
+        if optimization_run is None:
+            return False
+
+        expected_revision = (optimization_run.campaign_revision + 1)
+
+        return (campaign.revision != expected_revision)
+
+    @classmethod
+    def get_schedule(cls, *, workspace, campaign_id, user, filters=None,):
+        campaign = cls.get_campaign(workspace=workspace, campaign_id=campaign_id, user=user,)
+
+        filters = filters or {}
+
+        tasks = list(
+            CampaignScheduleSelector.get_tasks(
+                campaign=campaign,
+                assignee_id=filters.get("assignee_id"),
+                status=filters.get("status"),
+                is_critical=filters.get("is_critical"),
+            )
+        )
+
+        dependencies = list(CampaignScheduleSelector.get_dependencies(campaign=campaign,))
+
+        task_ids = {task.id for task in tasks}
+
+        visible_dependencies = [
+            dependency
+            for dependency in dependencies
+            if (dependency.task_id in task_ids and dependency.depends_on_task_id in task_ids
+            )
+        ]
+
+        scheduled_tasks = [task for task in tasks if cls.is_task_scheduled(task=task)]
+
+        unscheduled_tasks = [task for task in tasks if not cls.is_task_scheduled(task=task)]
+
+        critical_tasks = [task for task in tasks if task.is_critical]
+
+        optimization_run = (OptimizerSelector.get_latest_applied_run(campaign=campaign,))
+
+        start_dates = [task.planned_start for task in scheduled_tasks]
+
+        end_dates = [task.planned_end for task in scheduled_tasks]
+
+        return {
+            "campaign_id": campaign.id,
+            "campaign_revision": campaign.revision,
+            "launch_at": campaign.launch_at,
+            "optimization_run_id": (
+                optimization_run.id
+                if optimization_run is not None
+                else None
+            ),
+            "optimization_stale": cls.is_optimization_stale(campaign=campaign, optimization_run=optimization_run,),
+            "schedule_start": (min(start_dates) if start_dates else None),
+            "schedule_end": (max(end_dates) if end_dates else None),
+            "summary": {
+                "total_tasks": len(tasks),
+                "scheduled_tasks": len(scheduled_tasks),
+                "unscheduled_tasks": len(unscheduled_tasks),
+                "critical_tasks": len(critical_tasks),
+                "total_dependencies": len(visible_dependencies),
+            },
+            "tasks": tasks,
+            "dependencies": visible_dependencies,
+            "unscheduled_task_ids": [task.id for task in unscheduled_tasks],
+        }
+
+    @classmethod
+    def get_critical_path(cls, *, workspace, campaign_id, user,):
+        campaign = cls.get_campaign(workspace=workspace, campaign_id=campaign_id, user=user,)
+
+        optimization_run = (OptimizerSelector.get_latest_applied_run(campaign=campaign,))
+
+        if optimization_run is None:
+            return {
+                "campaign_id": campaign.id,
+                "campaign_revision": campaign.revision,
+                "optimization_run_id": None,
+                "optimization_revision": None,
+                "applied_at": None,
+                "available": False,
+                "stale": False,
+                "risk": None,
+                "makespan_hours": None,
+                "critical_path": [],
+                "tasks": [],
+                "missing_task_ids": [],
+            }
+
+        output = optimization_run.output_json
+
+        critical_path_ids = [
+            str(task_id)
+            for task_id in output.get(
+                "critical_path",
+                [],
+            )
+        ]
+
+        tasks = CampaignScheduleSelector.get_tasks(campaign=campaign,).filter(id__in=critical_path_ids,)
+
+        task_map = {str(task.id): task for task in tasks}
+
+        ordered_tasks = [task_map[task_id] for task_id in critical_path_ids if task_id in task_map]
+
+        missing_task_ids = [task_id for task_id in critical_path_ids if task_id not in task_map]
+
+        stale = (
+            cls.is_optimization_stale(campaign=campaign, optimization_run=optimization_run,)
+            or bool(missing_task_ids)
+            or any(not task.is_critical for task in ordered_tasks)
+        )
+
+        return {
+            "campaign_id": campaign.id,
+            "campaign_revision": campaign.revision,
+            "optimization_run_id": optimization_run.id,
+            "optimization_revision": (optimization_run.campaign_revision),
+            "applied_at": optimization_run.applied_at,
+            "available": "critical_path" in output,
+            "stale": stale,
+            "risk": optimization_run.risk,
+            "makespan_hours": (optimization_run.makespan_hours),
+            "critical_path": critical_path_ids,
+            "tasks": ordered_tasks,
+            "missing_task_ids": missing_task_ids,
+        }
 
 
 def apply_optimization_run(run, user, edits=None):
