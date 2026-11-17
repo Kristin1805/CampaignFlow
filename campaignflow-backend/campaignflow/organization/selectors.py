@@ -217,3 +217,14 @@ class WorkspaceCapacitySelector:
     @staticmethod
     def get_member(*, workspace: Workspace, member_id: UUID, start_date, end_date) -> WorkspaceMember | None:
         return WorkspaceCapacitySelector.get_workspace_members(workspace=workspace, start_date=start_date, end_date=end_date,).filter(id=member_id).first()
+
+    @classmethod
+    def get_workload_members(cls, *, workspace: Workspace, start_date, end_date) -> QuerySet[WorkspaceMember]:
+        return (
+            cls.get_workspace_members(workspace=workspace, start_date=start_date, end_date=end_date)
+            .filter(user__is_active=True)
+            .exclude(role=WorkspaceMember.Role.GUEST)
+            .prefetch_related(
+                Prefetch("member_skills", queryset=WorkspaceMemberSkill.objects.select_related("skill")),
+            )
+        )
