@@ -14,7 +14,7 @@ from campaignflow.optimizer.selectors import OptimizerSelector
 from campaignflow.optimizer.services import (
     OptimizationHistoryService,
     OptimizerService,
-    apply_optimization_run, CampaignScheduleService,
+    apply_optimization_run, CampaignScheduleService, CampaignRiskAnalysisService,
 )
 from campaignflow.tasks.enums import TaskStatus
 
@@ -583,9 +583,7 @@ class CampaignScheduleApi(APIView):
                 "workspace": ("Workspace context is required.")
             })
 
-        filter_serializer = (
-            CampaignScheduleFilterSerializer(data=request.query_params.dict(),)
-        )
+        filter_serializer = (CampaignScheduleFilterSerializer(data=request.query_params.dict(),))
 
         filter_serializer.is_valid(raise_exception=True,)
 
@@ -622,3 +620,78 @@ class CampaignCriticalPathApi(APIView):
 
         return Response(serializer.data,status=status.HTTP_200_OK,)
 
+
+class CampaignRiskFactorSerializer(serializers.Serializer):
+    code = serializers.CharField()
+    risk = serializers.ChoiceField(choices=Risk.choices)
+    message = serializers.CharField()
+    recommendation = serializers.CharField()
+    task_ids = serializers.ListField(child=serializers.UUIDField())
+    affected_tasks_count = serializers.IntegerField()
+
+
+class CampaignRiskOptimizationSerializer(serializers.Serializer):
+    run_id = serializers.UUIDField(allow_null=True)
+    risk = serializers.ChoiceField(choices=Risk.choices, allow_null=True, allow_blank=True)
+    applied_at = serializers.DateTimeField(allow_null=True)
+    available = serializers.BooleanField()
+    stale = serializers.BooleanField()
+
+
+class CampaignRiskSummarySerializer(serializers.Serializer):
+    total_tasks = serializers.IntegerField()
+    active_tasks = serializers.IntegerField()
+    completed_tasks = serializers.IntegerField()
+    cancelled_tasks = serializers.IntegerField()
+    scheduled_tasks = serializers.IntegerField()
+    unscheduled_tasks = serializers.IntegerField()
+    unassigned_tasks = serializers.IntegerField()
+    overdue_tasks = serializers.IntegerField()
+    approaching_deadline_tasks = serializers.IntegerField()
+    blocked_tasks = serializers.IntegerField()
+    critical_tasks = serializers.IntegerField()
+    critical_overdue_tasks = serializers.IntegerField()
+    critical_blocked_tasks = serializers.IntegerField()
+    critical_low_slack_tasks = serializers.IntegerField()
+    affected_tasks = serializers.IntegerField()
+    risk_factors = serializers.IntegerField()
+
+
+class CampaignRiskBlockedTaskSerializer(serializers.Serializer):
+    task_id = serializers.UUIDField()
+    blocked_by = serializers.ListField(child=serializers.UUIDField())
+    is_critical = serializers.BooleanField()
+
+
+class CampaignRiskAnalysisOutputSerializer(serializers.Serializer):
+    campaign_id = serializers.UUIDField()
+    campaign_revision = serializers.IntegerField()
+    analyzed_at = serializers.DateTimeField()
+    risk = serializers.ChoiceField(choices=Risk.choices)
+    data_complete = serializers.BooleanField()
+    launch_at = serializers.DateTimeField(allow_null=True)
+    remaining_hours = serializers.FloatField(allow_null=True)
+    planned_completion_at = serializers.DateTimeField(allow_null=True)
+    progress_percentage = serializers.FloatField(allow_null=True)
+    optimization = CampaignRiskOptimizationSerializer()
+    summary = CampaignRiskSummarySerializer()
+    factors = CampaignRiskFactorSerializer(many=True)
+    blocked_tasks = CampaignRiskBlockedTaskSerializer(many=True)
+    recommendations = serializers.ListField(child=serializers.CharField())
+
+
+class CampaignRiskAnalysisApi(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, campaign_id):
+        workspace = getattr(request, "workspace", None)
+
+        if workspace is None:
+            raise ValidationError({"workspace": "Workspace context is required."})
+
+        result = CampaignRiskAnalysisService.get_risk_analysis(
+            workspace=workspace, campaign_id=campaign_id, user=request.user,
+        )
+
+        serializer = CampaignRiskAnalysisOutputSerializer(instance=result)
+        return Response(serializer.data, status=status.HTTP_200_OK)

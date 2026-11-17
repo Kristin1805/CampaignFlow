@@ -25,6 +25,7 @@ from rest_framework.exceptions import (
 )
 
 from campaignflow.campaigns.models import Campaign
+from campaignflow.optimizer.risk import CampaignRiskAnalyzer
 from campaignflow.organization.models import WorkspaceMember
 from campaignflow.optimizer.models import OptimizationRun
 from campaignflow.optimizer.selectors import OptimizerSelector
@@ -757,7 +758,6 @@ class OptimizationHistoryService:
         return (optimization_run.campaign_revision != optimization_run.campaign.revision)
 
 
-
 class CampaignScheduleService:
 
     @staticmethod
@@ -924,6 +924,26 @@ class CampaignScheduleService:
             "missing_task_ids": missing_task_ids,
         }
 
+class CampaignRiskAnalysisService:
+
+    @classmethod
+    def get_risk_analysis(cls, *, workspace, campaign_id, user):
+        campaign = CampaignScheduleService.get_campaign(workspace=workspace, campaign_id=campaign_id, user=user,)
+
+        tasks = list(CampaignScheduleSelector.get_tasks(campaign=campaign))
+        dependencies = list(CampaignScheduleSelector.get_dependencies(campaign=campaign))
+        optimization_run = OptimizerSelector.get_latest_applied_run(campaign=campaign)
+
+        optimization_stale = CampaignScheduleService.is_optimization_stale(campaign=campaign, optimization_run=optimization_run,)
+
+        return CampaignRiskAnalyzer.analyze(
+            campaign=campaign,
+            tasks=tasks,
+            dependencies=dependencies,
+            optimization_run=optimization_run,
+            optimization_stale=optimization_stale,
+            now=timezone.now(),
+        )
 
 def apply_optimization_run(run, user, edits=None):
     return OptimizationApplyService.apply_optimization_run(run=run, user=user,edits=edits,)

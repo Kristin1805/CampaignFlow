@@ -4,7 +4,7 @@ from campaignflow.optimizer.apis import (
     OptimizationApplyApi,
     OptimizationDetailsApi,
     OptimizationHistoryApi,
-    OptimizationPreviewApi, CampaignScheduleApi, CampaignCriticalPathApi,
+    OptimizationPreviewApi, CampaignScheduleApi, CampaignCriticalPathApi, CampaignRiskAnalysisApi,
 )
 
 
@@ -15,4 +15,5 @@ urlpatterns = [
     path("optimization-runs/<uuid:run_id>/", OptimizationDetailsApi.as_view(), name="optimization-run-details",),
     path("campaigns/<uuid:campaign_id>/schedule/", CampaignScheduleApi.as_view(), name="campaign-schedule",),
     path("campaigns/<uuid:campaign_id>/critical-path/", CampaignCriticalPathApi.as_view(), name="campaign-critical-path",),
+    path("campaigns/<uuid:campaign_id>/risk-analysis/", CampaignRiskAnalysisApi.as_view(),name="campaign-risk-analysis",),
 ]
