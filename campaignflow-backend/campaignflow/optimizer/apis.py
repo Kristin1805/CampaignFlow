@@ -7,8 +7,12 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from campaignflow.optimizer.models import OptimizationRun, Risk
+from campaignflow.optimizer.pagination import (
+    OptimizationHistoryPagination,
+)
 from campaignflow.optimizer.selectors import OptimizerSelector
 from campaignflow.optimizer.services import (
+    OptimizationHistoryService,
     OptimizerService,
     apply_optimization_run,
 )
@@ -133,6 +137,166 @@ class OptimizationPreviewOutputSerializer(
     diff = serializers.ListField(child=serializers.DictField(),)
 
 
+
+
+class OptimizationHistoryFilterSerializer(StrictSerializer):
+
+    risk = serializers.ChoiceField(
+        choices=Risk.choices,
+        required=False,
+    )
+
+    feasible = serializers.BooleanField(
+        required=False,
+    )
+
+    applied = serializers.BooleanField(
+        required=False,
+    )
+
+    page = serializers.IntegerField(
+        min_value=1,
+        required=False,
+    )
+
+    page_size = serializers.IntegerField(
+        min_value=1,
+        max_value=100,
+        required=False,
+    )
+
+
+# CF-054: History serializers
+
+
+class OptimizationRequestedBySerializer(
+    serializers.Serializer
+):
+
+    id = serializers.ReadOnlyField()
+
+    email = serializers.EmailField(
+        read_only=True,
+    )
+
+
+class OptimizationHistoryOutputSerializer(
+    serializers.ModelSerializer
+):
+
+    run_id = serializers.UUIDField(
+        source="id",
+        read_only=True,
+    )
+
+    campaign_id = serializers.UUIDField(
+        read_only=True,
+    )
+
+    requested_by = OptimizationRequestedBySerializer(
+        read_only=True,
+    )
+
+    applied = serializers.SerializerMethodField()
+
+    class Meta:
+        model = OptimizationRun
+
+        fields = (
+            "run_id",
+            "campaign_id",
+            "requested_by",
+            "feasible",
+            "risk",
+            "makespan_hours",
+            "engine_version",
+            "duration_ms",
+            "campaign_revision",
+            "applied",
+            "applied_at",
+            "created_at",
+        )
+
+        read_only_fields = fields
+
+    def get_applied(self, obj):
+        return OptimizationHistoryService.is_applied(
+            optimization_run=obj,
+        )
+
+
+# CF-054: Details serializer
+
+
+class OptimizationDetailsOutputSerializer(
+    OptimizationHistoryOutputSerializer
+):
+
+    current_campaign_revision = serializers.IntegerField(
+        source="campaign.revision",
+        read_only=True,
+    )
+
+    stale = serializers.SerializerMethodField()
+
+    schedule = serializers.SerializerMethodField()
+
+    critical_path = serializers.SerializerMethodField()
+
+    changes = serializers.SerializerMethodField()
+
+    must_finish_by = serializers.SerializerMethodField()
+
+    class Meta(OptimizationHistoryOutputSerializer.Meta):
+        fields = (
+            OptimizationHistoryOutputSerializer.Meta.fields
+            + (
+                "current_campaign_revision",
+                "stale",
+                "input_json",
+                "output_json",
+                "schedule",
+                "critical_path",
+                "changes",
+                "must_finish_by",
+            )
+        )
+
+        read_only_fields = fields
+
+    def get_stale(self, obj):
+        return OptimizationHistoryService.is_stale(
+            optimization_run=obj,
+        )
+
+    def get_schedule(self, obj):
+        return obj.output_json.get(
+            "schedule",
+            [],
+        )
+
+    def get_critical_path(self, obj):
+        return obj.output_json.get(
+            "critical_path",
+            [],
+        )
+
+    def get_changes(self, obj):
+        return obj.output_json.get(
+            "changes",
+            [],
+        )
+
+    def get_must_finish_by(self, obj):
+        return obj.output_json.get(
+            "must_finish_by",
+            [],
+        )
+
+
+# CF-053: Preview API
+
+
 class OptimizationPreviewApi(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -157,7 +321,7 @@ class OptimizationPreviewApi(APIView):
         data = {
             "run_id": optimization_run.id,
             "campaign_id": optimization_run.campaign_id,
-            "campaign_revision": (optimization_run.campaign_revision),
+            "campaign_revision": optimization_run.campaign_revision,
             "feasible": optimization_run.feasible,
             "makespan_hours": optimization_run.makespan_hours,
             "risk": optimization_run.risk,
@@ -226,15 +390,11 @@ class OptimizationApplyApi(APIView):
 
         serializer = OptimizationApplyInputSerializer(data=request.data,)
 
-        serializer.is_valid(raise_exception=True)
+        serializer.is_valid(raise_exception=True,)
 
-        run_exists = OptimizationRun.objects.filter(
-            id=run_id,
-            campaign__workspace=workspace,
-            campaign__is_archived=False,
-        ).exists()
+        existing_run = OptimizerSelector.get_optimization_run(workspace=workspace, run_id=run_id,)
 
-        if not run_exists:
+        if existing_run is None:
             raise NotFound("Optimization run not found.")
 
         edits = self.serialize_edits(serializer.validated_data.get("edits"),)
@@ -252,3 +412,84 @@ class OptimizationApplyApi(APIView):
         output_serializer = OptimizationApplyOutputSerializer(instance=optimization_run,)
 
         return Response(output_serializer.data, status=status.HTTP_200_OK,)
+
+
+
+class OptimizationHistoryApi(APIView):
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, campaign_id):
+        workspace = getattr(
+            request,
+            "workspace",
+            None,
+        )
+
+        if workspace is None:
+            raise ValidationError({
+                "workspace": "Workspace context is required."
+            })
+
+        filter_serializer = OptimizationHistoryFilterSerializer(
+            data=request.query_params.dict(),
+        )
+
+        filter_serializer.is_valid(
+            raise_exception=True,
+        )
+
+        queryset = OptimizationHistoryService.get_history(
+            workspace=workspace,
+            campaign_id=campaign_id,
+            user=request.user,
+            filters=filter_serializer.validated_data,
+        )
+
+        paginator = OptimizationHistoryPagination()
+
+        page = paginator.paginate_queryset(
+            queryset,
+            request,
+            view=self,
+        )
+
+        serializer = OptimizationHistoryOutputSerializer(
+            instance=page,
+            many=True,
+        )
+
+        return paginator.get_paginated_response(
+            serializer.data,
+        )
+
+class OptimizationDetailsApi(APIView):
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, run_id):
+        workspace = getattr(
+            request,
+            "workspace",
+            None,
+        )
+
+        if workspace is None:
+            raise ValidationError({
+                "workspace": "Workspace context is required."
+            })
+
+        optimization_run = OptimizationHistoryService.get_details(
+            workspace=workspace,
+            run_id=run_id,
+            user=request.user,
+        )
+
+        serializer = OptimizationDetailsOutputSerializer(
+            instance=optimization_run,
+        )
+
+        return Response(
+            serializer.data,
+            status=status.HTTP_200_OK,
+        )

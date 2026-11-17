@@ -1,6 +1,7 @@
 from django.db.models import Prefetch
 
 from campaignflow.campaigns.models import Campaign
+from campaignflow.optimizer.models import OptimizationRun
 from campaignflow.organization.models import (
     WorkspaceMember,
     WorkspaceMemberSkill,
@@ -33,6 +34,7 @@ class OptimizerSelector:
         return list(
             TaskDependency.objects.filter(
                 task__campaign=campaign,
+                depends_on_task__campaign=campaign,
                 task_id__in=task_ids,
                 depends_on_task_id__in=task_ids,
             ).order_by("id")
@@ -68,11 +70,10 @@ class OptimizerSelector:
         except WorkspaceMember.availability.RelatedObjectDoesNotExist:
             availability = None
 
-        hours = (
-            availability.working_hours_per_day
-            if availability and availability.working_hours_per_day is not None
-            else member.workspace.working_hours_per_day
-        )
+        if (availability is not None and availability.working_hours_per_day is not None):
+            hours = availability.working_hours_per_day
+        else:
+            hours = member.workspace.working_hours_per_day
 
         return {"capacity_h_per_day": hours}
 
@@ -85,3 +86,46 @@ class OptimizerSelector:
             }
             for period in member.time_off_periods.all()
         ]
+
+    # CF-054: Optimization history
+
+    @staticmethod
+    def get_optimization_runs(
+        *,
+        workspace,
+        campaign_id,
+        risk=None,
+        feasible=None,
+        applied=None,
+    ):
+        queryset = (
+            OptimizationRun.objects.filter(
+                campaign_id=campaign_id,
+                campaign__workspace=workspace,
+                campaign__is_archived=False,
+            )
+            .select_related("campaign","requested_by",)
+        )
+
+        if risk is not None:
+            queryset = queryset.filter(risk=risk,)
+
+        if feasible is not None:
+            queryset = queryset.filter(feasible=feasible,)
+
+        if applied is not None:
+            queryset = queryset.filter(applied_at__isnull=not applied,)
+
+        return queryset.order_by("-created_at","-id",)
+
+    @staticmethod
+    def get_optimization_run(*, workspace, run_id,):
+        return (
+            OptimizationRun.objects.filter(
+                id=run_id,
+                campaign__workspace=workspace,
+                campaign__is_archived=False,
+            )
+            .select_related("campaign", "campaign__workspace", "requested_by",)
+            .first()
+        )

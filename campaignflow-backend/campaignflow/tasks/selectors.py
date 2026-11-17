@@ -237,10 +237,7 @@ class TaskDependencySelector:
                 task__campaign__workspace=workspace,
                 task__campaign__is_archived=False,
             )
-            .select_related(
-                "task",
-                "depends_on_task",
-            )
+            .select_related("task", "depends_on_task",)
             .order_by("created_at", "id")
         )
 
@@ -252,10 +249,7 @@ class TaskDependencySelector:
                 depends_on_task__campaign__workspace=workspace,
                 depends_on_task__campaign__is_archived=False,
             )
-            .select_related(
-                "task",
-                "depends_on_task",
-            )
+            .select_related("task", "depends_on_task",)
             .order_by("created_at", "id")
         )
 
@@ -282,10 +276,7 @@ class TaskDependencySelector:
                 task__campaign__workspace=workspace,
                 task__campaign__is_archived=False,
             )
-            .select_related(
-                "task",
-                "depends_on_task",
-            )
+            .select_related("task","depends_on_task",)
             .order_by("created_at", "id")
         )
 
@@ -318,12 +309,8 @@ class TaskStatusSelector:
     @staticmethod
     def get_incomplete_dependencies(*, task):
         return (
-            TaskDependency.objects.filter(
-                task=task,
-            )
-            .exclude(
-                depends_on_task__status=TaskStatus.COMPLETED
-            )
+            TaskDependency.objects.filter(task=task,)
+            .exclude(depends_on_task__status=TaskStatus.COMPLETED)
             .select_related("depends_on_task")
             .order_by("created_at", "id")
         )
@@ -352,10 +339,7 @@ class TaskCommentSelector:
     @staticmethod
     def get_comment(*, task, comment_id):
         return (
-            TaskComment.objects.filter(
-                task=task,
-                comment_id=comment_id,
-            )
+            TaskComment.objects.filter(task=task,comment_id=comment_id,)
             .select_related("author")
             .first()
         )
