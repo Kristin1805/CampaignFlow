@@ -2,7 +2,7 @@ from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
-from django.db.models import Count, DecimalField, Sum, Value
+from django.db.models import Count, DecimalField, Sum, Value, Q, F
 from django.db.models.functions import Coalesce
 
 from campaignflow.tasks.enums import TaskStatus
@@ -219,6 +219,30 @@ class TaskWorkloadSelector:
             for row in rows
         }
 
+    @staticmethod
+    def get_workspace_workload_tasks(*, workspace, start_date, end_date, tz,
+                                     campaign_id=None):
+        period_start = datetime.combine(start_date, time.min, tzinfo=tz)
+        period_end = datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=tz)
+
+        queryset = Task.objects.filter(
+            campaign__workspace=workspace,
+            campaign__is_archived=False,
+        ).exclude(
+            status__in=[TaskStatus.COMPLETED, TaskStatus.CANCELLED],
+        )
+
+        if campaign_id is not None:
+            queryset = queryset.filter(campaign_id=campaign_id)
+
+        queryset = queryset.filter(
+            Q(planned_start__isnull=True)
+            | Q(planned_end__isnull=True)
+            | Q(planned_start__gte=F("planned_end"))
+            | Q(planned_start__lt=period_end, planned_end__gt=period_start)
+        )
+
+        return queryset.order_by("planned_start", "id")
 
 class TaskDependencySelector:
     @staticmethod
@@ -381,3 +405,4 @@ class CampaignScheduleSelector:
             .select_related("task", "depends_on_task",)
             .order_by("task_id", "depends_on_task_id",)
         )
+

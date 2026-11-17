@@ -5,6 +5,7 @@ from rest_framework.exceptions import NotFound
 from rest_framework.response import Response
 
 from campaignflow.core.apis import PrivateApi
+from campaignflow.organization.enums import WorkloadStatus
 from campaignflow.organization.models import WorkspaceMember
 from campaignflow.organization.permissions import WorkspacePermission, WorkspaceAvailabilityPermission
 from campaignflow.organization.selectors import WorkspaceSelector, WorkspaceInvitationSelector, WorkspaceMemberSelector, \
@@ -615,3 +616,176 @@ class WorkspaceMemberWorkloadApi(PrivateApi):
 
         return Response(self.OutputSerializer(result).data, status=status.HTTP_200_OK)
 
+
+class WorkspaceWorkloadFilterSerializer(serializers.Serializer):
+    start_date = serializers.DateField(required=False)
+    end_date = serializers.DateField(required=False)
+    member_id = serializers.UUIDField(required=False)
+    campaign_id = serializers.UUIDField(required=False)
+    skill = serializers.CharField(required=False, max_length=100)
+    status = serializers.ChoiceField(choices=WorkloadStatus.choices, required=False)
+
+    def to_internal_value(self, data):
+        unknown_fields = set(data) - set(self.fields)
+
+        if unknown_fields:
+            raise serializers.ValidationError({
+                field: "Unknown filter." for field in sorted(unknown_fields)
+            })
+
+        return super().to_internal_value(data)
+
+    def validate(self, attrs):
+        start_date = attrs.get("start_date")
+        end_date = attrs.get("end_date")
+
+        if start_date is not None and end_date is not None and start_date > end_date:
+            raise serializers.ValidationError({
+                "end_date": "End date must not precede start date.",
+            })
+
+        return attrs
+
+
+class IndividualWorkloadFilterSerializer(serializers.Serializer):
+    start_date = serializers.DateField(required=False)
+    end_date = serializers.DateField(required=False)
+    campaign_id = serializers.UUIDField(required=False)
+
+    def to_internal_value(self, data):
+        unknown_fields = set(data) - set(self.fields)
+
+        if unknown_fields:
+            raise serializers.ValidationError({
+                field: "Unknown filter." for field in sorted(unknown_fields)
+            })
+
+        return super().to_internal_value(data)
+
+
+class WorkloadMetricsSerializer(serializers.Serializer):
+    capacity_hours = serializers.DecimalField(max_digits=14, decimal_places=2)
+    workload_hours = serializers.DecimalField(max_digits=14, decimal_places=2)
+    remaining_capacity_hours = serializers.DecimalField(max_digits=14, decimal_places=2)
+    overload_hours = serializers.DecimalField(max_digits=14, decimal_places=2)
+    utilization_percentage = serializers.DecimalField(
+        max_digits=18, decimal_places=2, allow_null=True,
+    )
+
+
+class WorkloadStatusMetricsSerializer(WorkloadMetricsSerializer):
+    status = serializers.ChoiceField(choices=WorkloadStatus.choices)
+
+
+class DailyWorkloadSerializer(WorkloadStatusMetricsSerializer):
+    date = serializers.DateField()
+    is_working_day = serializers.BooleanField()
+    is_absent = serializers.BooleanField()
+    task_ids = serializers.ListField(child=serializers.UUIDField())
+
+
+class WeeklyWorkloadSerializer(WorkloadStatusMetricsSerializer):
+    week_start = serializers.DateField()
+    week_end = serializers.DateField()
+
+
+class CampaignWorkloadSerializer(serializers.Serializer):
+    campaign_id = serializers.UUIDField()
+    workload_hours = serializers.DecimalField(max_digits=14, decimal_places=2)
+
+
+class WorkloadConflictSerializer(serializers.Serializer):
+    task_ids = serializers.ListField(child=serializers.UUIDField())
+    campaign_ids = serializers.ListField(child=serializers.UUIDField())
+    overlap_start = serializers.DateTimeField()
+    overlap_end = serializers.DateTimeField()
+    overlap_hours = serializers.DecimalField(max_digits=14, decimal_places=2)
+
+
+class MemberWorkloadSerializer(WorkloadStatusMetricsSerializer):
+    member_id = serializers.UUIDField()
+    name = serializers.CharField(allow_blank=True)
+    email = serializers.EmailField()
+    skills = serializers.ListField(child=serializers.CharField())
+    scheduled_tasks_count = serializers.IntegerField()
+    unscheduled_tasks_count = serializers.IntegerField()
+    unscheduled_task_ids = serializers.ListField(child=serializers.UUIDField())
+    overloaded_days_count = serializers.IntegerField()
+    conflicts_count = serializers.IntegerField()
+    conflicts = WorkloadConflictSerializer(many=True)
+    daily_breakdown = DailyWorkloadSerializer(many=True)
+    weekly_breakdown = WeeklyWorkloadSerializer(many=True)
+    campaign_breakdown = CampaignWorkloadSerializer(many=True)
+
+
+class WorkspaceWorkloadSummarySerializer(WorkloadMetricsSerializer):
+    total_members = serializers.IntegerField()
+    available_members = serializers.IntegerField()
+    balanced_members = serializers.IntegerField()
+    fully_booked_members = serializers.IntegerField()
+    overloaded_members = serializers.IntegerField()
+    unavailable_members = serializers.IntegerField()
+    conflicts_count = serializers.IntegerField()
+    overloaded_days_count = serializers.IntegerField()
+
+
+class WorkspaceWorkloadTaskSummarySerializer(serializers.Serializer):
+    unassigned_tasks_count = serializers.IntegerField()
+    unscheduled_tasks_count = serializers.IntegerField()
+    unassigned_task_ids = serializers.ListField(child=serializers.UUIDField())
+    unscheduled_task_ids = serializers.ListField(child=serializers.UUIDField())
+
+
+class WorkspaceWorkloadOutputSerializer(serializers.Serializer):
+    workspace_id = serializers.UUIDField()
+    start_date = serializers.DateField()
+    end_date = serializers.DateField()
+    timezone = serializers.CharField()
+    summary = WorkspaceWorkloadSummarySerializer()
+    members = MemberWorkloadSerializer(many=True)
+    workspace_task_summary = WorkspaceWorkloadTaskSummarySerializer()
+
+
+class IndividualWorkloadOutputSerializer(serializers.Serializer):
+    workspace_id = serializers.UUIDField()
+    start_date = serializers.DateField()
+    end_date = serializers.DateField()
+    timezone = serializers.CharField()
+    member = MemberWorkloadSerializer()
+
+
+class WorkspaceWorkloadApi(PrivateApi):
+
+    def get(self, request, workspace_id, *args, **kwargs):
+        filters = WorkspaceWorkloadFilterSerializer(data=request.query_params.dict())
+        filters.is_valid(raise_exception=True)
+
+        result = WorkspaceWorkloadService.get_workload(
+            workspace_id=workspace_id,
+            user=request.user,
+            filters=filters.validated_data,
+        )
+
+        return Response(
+            WorkspaceWorkloadOutputSerializer(instance=result).data,
+            status=status.HTTP_200_OK,
+        )
+
+
+class IndividualWorkloadApi(PrivateApi):
+
+    def get(self, request, workspace_id, member_id, *args, **kwargs):
+        filters = IndividualWorkloadFilterSerializer(data=request.query_params.dict())
+        filters.is_valid(raise_exception=True)
+
+        result = WorkspaceWorkloadService.get_individual_workload(
+            workspace_id=workspace_id,
+            member_id=member_id,
+            user=request.user,
+            filters=filters.validated_data,
+        )
+
+        return Response(
+            IndividualWorkloadOutputSerializer(instance=result).data,
+            status=status.HTTP_200_OK,
+        )

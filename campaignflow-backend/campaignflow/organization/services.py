@@ -1,19 +1,26 @@
 import hashlib
-from datetime import timedelta
+from collections import defaultdict
+from datetime import timedelta, time, date
 from decimal import Decimal, ROUND_HALF_UP
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from django.core.exceptions import ValidationError as DjangoValidationError, ValidationError, ObjectDoesNotExist
 from django.db import transaction, IntegrityError
 from django.utils import timezone
 from rest_framework.exceptions import (PermissionDenied, ValidationError as DRFValidationError, NotFound, )
 
+from .enums import WorkloadStatus
 from .models import Workspace, WorkspaceMember, Skill, WorkspaceMemberSkill, WorkspaceInvitation, \
     WorkspaceMemberTimeOff, WorkspaceMemberAvailability
 from .permissions import WorkspacePermission, WorkspaceAvailabilityPermission
-from .selectors import WorkspaceCapacitySelector
+from .selectors import WorkspaceCapacitySelector, WorkspaceSelector
 from .tasks import send_workspace_invitation_email
 from .validators import validate_time_off_dates
+from .workload import WorkloadCalculator
+from ..campaigns.models import Campaign
+from ..optimizer.selectors import OptimizerSelector
+from ..tasks.selectors import TaskWorkloadSelector
 
 
 def validate_workspace_model(workspace: Workspace) -> None:
@@ -454,68 +461,214 @@ class WorkspaceCapacityService:
 
 
 class WorkspaceWorkloadService:
-    @staticmethod
-    def calculate_member_workload(*, capacity: dict, assigned_hours, active_tasks_count: int) -> dict:
-        available_hours = Decimal(str(capacity["total_available_hours"]))
-        assigned_hours = Decimal(str(assigned_hours))
-        remaining_hours = available_hours - assigned_hours
+    MAX_PERIOD_DAYS = 90
+    DEFAULT_PERIOD_DAYS = 7
+    DEFAULT_DAY_START = time(9, 0)
 
-        if available_hours > 0:
-            utilization = (assigned_hours / available_hours * 100).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-        elif assigned_hours == 0:
-            utilization = Decimal("0.00")
-        else:
-            utilization = None
+    @staticmethod
+    def get_workspace(*, workspace_id, user):
+        if not user or not user.is_authenticated or not user.is_active:
+            raise PermissionDenied("Authentication required.")
+
+        membership = WorkspaceSelector.get_membership(workspace_id=workspace_id, user=user)
+
+        if membership is None:
+            raise NotFound("Workspace not found.")
+
+        if membership.role not in (WorkspaceMember.Role.ADMIN, WorkspaceMember.Role.MANAGER):
+            raise PermissionDenied("You cannot view workspace workload.")
+
+        return membership.workspace
+
+    @classmethod
+    def get_period(cls, *, start_date, end_date, tz):
+        start_date = start_date or timezone.now().astimezone(tz).date()
+        end_date = end_date or start_date + timedelta(days=cls.DEFAULT_PERIOD_DAYS - 1)
+
+        if start_date > end_date:
+            raise DRFValidationError({"end_date": "End date must not precede start date."})
+
+        if (end_date - start_date).days + 1 > cls.MAX_PERIOD_DAYS:
+            raise DRFValidationError({
+                "end_date": f"The selected period cannot exceed {cls.MAX_PERIOD_DAYS} days.",
+            })
+
+        return start_date, end_date
+
+    @staticmethod
+    def get_member_skills(*, member):
+        return sorted(member_skill.skill.code for member_skill in member.member_skills.all())
+
+    @classmethod
+    def get_member_workload(cls, *, member, tasks, start_date, end_date, tz):
+        capacity = WorkspaceCapacityService.calculate_member_capacity(
+            member=member, start_date=start_date, end_date=end_date,
+        )
+
+        absences = [
+            (period.start_date, period.end_date)
+            for period in member.capacity_time_off
+        ]
+
+        user = member.user
+        get_full_name = getattr(user, "get_full_name", None)
+        name = (get_full_name() if callable(get_full_name) else "") or user.email
+
+        return WorkloadCalculator.calculate_member(
+            member_id=member.id,
+            name=name,
+            email=user.email,
+            skills=cls.get_member_skills(member=member),
+            tasks=tasks,
+            working_days=capacity["working_days"],
+            hours_per_day=capacity["working_hours_per_day"],
+            absences=absences,
+            start_date=start_date,
+            end_date=end_date,
+            day_start=cls.DEFAULT_DAY_START,
+            tz=tz,
+            capacity_data=capacity["daily_capacity"],
+        )
+
+    @classmethod
+    def build_summary(cls, members):
+        zero = WorkloadCalculator.ZERO
+
+        capacity = sum((member["capacity_hours"] for member in members), zero)
+        workload = sum((member["workload_hours"] for member in members), zero)
+        remaining_capacity = sum((member["remaining_capacity_hours"] for member in members), zero)
+        overload = sum((member["overload_hours"] for member in members), zero)
 
         return {
-            "workspace_member_id": capacity["workspace_member_id"],
-            "user_id": capacity["user_id"],
-            "start_date": capacity["start_date"],
-            "end_date": capacity["end_date"],
-            "available_hours": available_hours,
-            "assigned_hours": assigned_hours,
-            "remaining_hours": remaining_hours,
-            "utilization_percentage": utilization,
-            "is_overloaded": assigned_hours > available_hours,
-            "active_tasks_count": active_tasks_count,
+            "total_members": len(members),
+            "capacity_hours": WorkloadCalculator.round_hours(capacity),
+            "workload_hours": WorkloadCalculator.round_hours(workload),
+            "remaining_capacity_hours": WorkloadCalculator.round_hours(remaining_capacity),
+            "overload_hours": WorkloadCalculator.round_hours(overload),
+            "utilization_percentage": WorkloadCalculator.get_utilization(capacity=capacity, workload=workload),
+            "available_members": sum(member["status"] == WorkloadStatus.AVAILABLE for member in members),
+            "balanced_members": sum(member["status"] == WorkloadStatus.BALANCED for member in members),
+            "fully_booked_members": sum(member["status"] == WorkloadStatus.FULLY_BOOKED for member in members),
+            "overloaded_members": sum(member["status"] == WorkloadStatus.OVERLOADED for member in members),
+            "unavailable_members": sum(member["status"] == WorkloadStatus.UNAVAILABLE for member in members),
+            "conflicts_count": sum(member["conflicts_count"] for member in members),
+            "overloaded_days_count": sum(member["overloaded_days_count"] for member in members),
+        }
+
+    @staticmethod
+    def validate_campaign(*, workspace, campaign_id):
+        if campaign_id is None:
+            return
+
+        exists = Campaign.objects.filter(
+            id=campaign_id, workspace=workspace, is_archived=False,
+        ).exists()
+
+        if not exists:
+            raise NotFound("Campaign not found.")
+
+    @classmethod
+    def get_workload(cls, *, workspace_id, user, filters=None):
+        filters = filters or {}
+        workspace = cls.get_workspace(workspace_id=workspace_id, user=user)
+        tz = ZoneInfo(workspace.timezone)
+
+        start_date, end_date = cls.get_period(
+            start_date=filters.get("start_date"), end_date=filters.get("end_date"), tz=tz,
+        )
+
+        member_id = filters.get("member_id")
+        campaign_id = filters.get("campaign_id")
+        skill = filters.get("skill")
+        workload_status = filters.get("status")
+
+        cls.validate_campaign(workspace=workspace, campaign_id=campaign_id)
+
+        members = WorkspaceCapacitySelector.get_workload_members(
+            workspace=workspace, start_date=start_date, end_date=end_date,
+        )
+
+        if member_id is not None:
+            members = members.filter(id=member_id)
+
+        members = list(members)
+
+        if member_id is not None and not members:
+            raise NotFound("Workspace member not found.")
+
+        if skill is not None:
+            members = [member for member in members if skill in cls.get_member_skills(member=member)]
+
+        tasks = list(TaskWorkloadSelector.get_workspace_workload_tasks(
+            workspace=workspace, start_date=start_date, end_date=end_date,
+            tz=tz, campaign_id=campaign_id,
+        ))
+
+        tasks_by_member = defaultdict(list)
+        unassigned_tasks = []
+        unscheduled_tasks = []
+
+        for task in tasks:
+            if task.assignee_id is None:
+                unassigned_tasks.append(task.id)
+            else:
+                tasks_by_member[task.assignee_id].append(task)
+
+            if not WorkloadCalculator.is_scheduled(task):
+                unscheduled_tasks.append(task.id)
+
+        results = []
+
+        for member in members:
+            result = cls.get_member_workload(
+                member=member,
+                tasks=tasks_by_member[member.id],
+                start_date=start_date,
+                end_date=end_date,
+                tz=tz,
+            )
+
+            if workload_status is not None and result["status"] != workload_status:
+                continue
+
+            results.append(result)
+
+        results.sort(key=lambda item: (
+            item["status"] != WorkloadStatus.OVERLOADED,
+            -(item["utilization_percentage"] or 0),
+            item["name"].lower(),
+            str(item["member_id"]),
+        ))
+
+        return {
+            "workspace_id": workspace.id,
+            "start_date": start_date,
+            "end_date": end_date,
+            "timezone": workspace.timezone,
+            "summary": cls.build_summary(results),
+            "members": results,
+            "workspace_task_summary": {
+                "unassigned_tasks_count": len(unassigned_tasks),
+                "unscheduled_tasks_count": len(unscheduled_tasks),
+                "unassigned_task_ids": sorted(unassigned_tasks, key=str),
+                "unscheduled_task_ids": sorted(unscheduled_tasks, key=str),
+            },
         }
 
     @classmethod
-    def calculate_team_workload(cls, *, workspace_id, start_date, end_date, member_capacities: list[dict], task_totals: dict) -> dict:
-        members = []
+    def get_individual_workload(cls, *, workspace_id, member_id, user, filters=None):
+        filters = dict(filters or {})
+        filters["member_id"] = member_id
 
-        for capacity in member_capacities:
-            member_id = capacity["workspace_member_id"]
-            totals = task_totals.get(member_id, {"assigned_hours": Decimal("0"), "active_tasks_count": 0})
+        result = cls.get_workload(workspace_id=workspace_id, user=user, filters=filters)
 
-            members.append(cls.calculate_member_workload(
-                capacity=capacity,
-                assigned_hours=totals["assigned_hours"],
-                active_tasks_count=totals["active_tasks_count"],
-            ))
-
-        available_hours = sum((member["available_hours"] for member in members), Decimal("0"))
-        assigned_hours = sum((member["assigned_hours"] for member in members), Decimal("0"))
-        remaining_hours = available_hours - assigned_hours
-
-        if available_hours > 0:
-            utilization = (assigned_hours / available_hours * 100).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-        elif assigned_hours == 0:
-            utilization = Decimal("0.00")
-        else:
-            utilization = None
+        if not result["members"]:
+            raise NotFound("Workspace member does not match the selected filters.")
 
         return {
-            "workspace_id": workspace_id,
-            "start_date": start_date,
-            "end_date": end_date,
-            "total_members": len(members),
-            "available_hours": available_hours,
-            "assigned_hours": assigned_hours,
-            "remaining_hours": remaining_hours,
-            "utilization_percentage": utilization,
-            "is_overloaded": any(member["is_overloaded"] for member in members),
-            "overloaded_members_count": sum(member["is_overloaded"] for member in members),
-            "active_tasks_count": sum(member["active_tasks_count"] for member in members),
-            "members": members,
+            "workspace_id": result["workspace_id"],
+            "start_date": result["start_date"],
+            "end_date": result["end_date"],
+            "timezone": result["timezone"],
+            "member": result["members"][0],
         }
