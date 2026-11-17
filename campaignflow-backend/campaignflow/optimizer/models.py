@@ -3,6 +3,12 @@ import uuid
 from django.conf import settings
 from django.db import models
 
+class Risk(models.TextChoices):
+    LOW = "LOW", "Low"
+    MEDIUM = "MEDIUM", "Medium"
+    HIGH = "HIGH", "High"
+    CRITICAL = "CRITICAL", "Critical"
+
 
 class OptimizationRun(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -20,7 +26,7 @@ class OptimizationRun(models.Model):
     output_json = models.JSONField(default=dict)
     feasible = models.BooleanField(default=False)
     makespan_hours = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
-    risk = models.DecimalField(max_digits=10, decimal_places=4, null=True, blank=True)
+    risk = models.CharField(max_length=10, choices=Risk.choices, blank=True)
     engine_version = models.CharField(max_length=100, blank=True)
     duration_ms = models.PositiveIntegerField(null=True, blank=True)
     campaign_revision = models.PositiveIntegerField()
