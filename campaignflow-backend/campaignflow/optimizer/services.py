@@ -735,5 +735,60 @@ class OptimizationApplyService:
         return optimization_run
 
 
+class OptimizationHistoryService:
+
+    @staticmethod
+    def get_history(
+        *,
+        workspace,
+        campaign_id,
+        user,
+        filters=None,
+    ):
+        campaign = OptimizerSelector.get_campaign(workspace=workspace, campaign_id=campaign_id,)
+
+        if campaign is None:
+            raise NotFound("Campaign not found.")
+
+        OptimizationApplyService.validate_permission(campaign=campaign, user=user,)
+
+        filters = filters or {}
+
+        return OptimizerSelector.get_optimization_runs(
+            workspace=workspace,
+            campaign_id=campaign.id,
+            risk=filters.get("risk"),
+            feasible=filters.get("feasible"),
+            applied=filters.get("applied"),
+        )
+
+    @staticmethod
+    def get_details(
+        *,
+        workspace,
+        run_id,
+        user,
+    ):
+        optimization_run = OptimizerSelector.get_optimization_run(workspace=workspace, run_id=run_id,)
+
+        if optimization_run is None:
+            raise NotFound("Optimization run not found.")
+
+        OptimizationApplyService.validate_permission(campaign=optimization_run.campaign, user=user,)
+
+        return optimization_run
+
+    @staticmethod
+    def is_applied(*, optimization_run):
+        return optimization_run.applied_at is not None
+
+    @staticmethod
+    def is_stale(*, optimization_run):
+        if optimization_run.applied_at is not None:
+            return False
+
+        return (optimization_run.campaign_revision != optimization_run.campaign.revision)
+
+
 def apply_optimization_run(run, user, edits=None):
     return OptimizationApplyService.apply_optimization_run(run=run, user=user,edits=edits,)
