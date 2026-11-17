@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from rest_framework import serializers, status
 from rest_framework.exceptions import NotFound, ValidationError
 from rest_framework.permissions import IsAuthenticated
@@ -6,24 +8,58 @@ from rest_framework.views import APIView
 
 from campaignflow.optimizer.models import OptimizationRun, Risk
 from campaignflow.optimizer.selectors import OptimizerSelector
-from campaignflow.optimizer.services import OptimizerService, apply_optimization_run
+from campaignflow.optimizer.services import (
+    OptimizerService,
+    apply_optimization_run,
+)
 
 
-class OptimizationTaskEditSerializer(serializers.Serializer):
+class StrictSerializer(serializers.Serializer):
+    def to_internal_value(self, data):
+        if isinstance(data, dict):
+            unknown_fields = set(data) - set(self.fields)
+
+            if unknown_fields:
+                raise serializers.ValidationError({
+                    field: "Unknown field."
+                    for field in sorted(unknown_fields)
+                })
+
+        return super().to_internal_value(data)
+
+
+class OptimizationTaskEditSerializer(StrictSerializer):
     task_id = serializers.UUIDField()
-    assignee_id = serializers.UUIDField(required=False, allow_null=True)
-    planned_start = serializers.DateTimeField(required=False, allow_null=True)
-    planned_end = serializers.DateTimeField(required=False, allow_null=True)
-    latest_start_at = serializers.DateTimeField(required=False, allow_null=True)
-    is_critical = serializers.BooleanField(required=False)
-    slack_hours = serializers.DecimalField(max_digits=10, decimal_places=2, required=False, allow_null=True)
-    due_at = serializers.DateTimeField(required=False, allow_null=True)
-    must_finish_by = serializers.DateTimeField(required=False, allow_null=True)
+
+    assignee_id = serializers.UUIDField(required=False, allow_null=True,)
+
+    planned_start = serializers.DateTimeField(required=False, allow_null=True,)
+
+    planned_end = serializers.DateTimeField(required=False, allow_null=True,)
+
+    latest_start_at = serializers.DateTimeField(required=False, allow_null=True,)
+
+    is_critical = serializers.BooleanField(required=False,)
+
+    slack_hours = serializers.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        min_value=Decimal("0.00"),
+        required=False,
+        allow_null=True,
+    )
+
+    due_at = serializers.DateTimeField(required=False, allow_null=True,)
+
+    must_finish_by = serializers.DateTimeField(required=False, allow_null=True,)
 
     def validate(self, attrs):
         if "due_at" in attrs and "must_finish_by" in attrs:
             raise serializers.ValidationError({
-                "due_at": "Provide either due_at or must_finish_by, not both."
+                "due_at": (
+                    "Provide either due_at or must_finish_by, "
+                    "not both."
+                )
             })
 
         planned_start = attrs.get("planned_start")
@@ -37,21 +73,43 @@ class OptimizationTaskEditSerializer(serializers.Serializer):
         return attrs
 
 
-class OptimizationApplyInputSerializer(serializers.Serializer):
-    edits = OptimizationTaskEditSerializer(many=True, required=False)
+class OptimizationApplyInputSerializer(StrictSerializer):
+    edits = OptimizationTaskEditSerializer(many=True, required=False,)
+
+    def validate_edits(self, edits):
+        task_ids = set()
+
+        for edit in edits:
+            task_id = edit["task_id"]
+
+            if task_id in task_ids:
+                raise serializers.ValidationError("Duplicate task ID.")
+
+            task_ids.add(task_id)
+
+        return edits
 
 
 class OptimizationApplyOutputSerializer(serializers.ModelSerializer):
-    run_id = serializers.UUIDField(source="id", read_only=True)
-    campaign_id = serializers.UUIDField(read_only=True)
+    run_id = serializers.UUIDField(source="id",read_only=True,)
+
+    campaign_id = serializers.UUIDField(read_only=True,)
+
     applied = serializers.SerializerMethodField()
-    current_campaign_revision = serializers.IntegerField(source="campaign.revision", read_only=True)
+
+    current_campaign_revision = serializers.IntegerField(source="campaign.revision", read_only=True,)
 
     class Meta:
         model = OptimizationRun
+
         fields = (
-            "run_id", "campaign_id", "feasible", "campaign_revision",
-            "current_campaign_revision", "applied", "applied_at",
+            "run_id",
+            "campaign_id",
+            "feasible",
+            "campaign_revision",
+            "current_campaign_revision",
+            "applied",
+            "applied_at",
         )
         read_only_fields = fields
 
@@ -59,58 +117,20 @@ class OptimizationApplyOutputSerializer(serializers.ModelSerializer):
         return obj.applied_at is not None
 
 
-class OptimizationApplyApi(APIView):
-    permission_classes = [IsAuthenticated]
-
-    def post(self, request, run_id):
-        serializer = OptimizationApplyInputSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-
-        edits = serializer.validated_data.get("edits")
-
-        if edits is not None:
-            datetime_fields = {
-                "planned_start", "planned_end", "latest_start_at",
-                "due_at", "must_finish_by",
-            }
-            uuid_fields = {"task_id", "assignee_id"}
-
-            edits = [
-                {
-                    key: (
-                        value.isoformat() if key in datetime_fields and value is not None
-                        else str(value) if key in uuid_fields | {"slack_hours"} and value is not None
-                        else value
-                    )
-                    for key, value in item.items()
-                }
-                for item in edits
-            ]
-
-        optimization_run = apply_optimization_run(
-            run=run_id,
-            user=request.user,
-            edits=edits,
-        )
-
-        optimization_run.refresh_from_db()
-        optimization_run.campaign.refresh_from_db(fields=["revision"])
-
-        output_serializer = OptimizationApplyOutputSerializer(optimization_run)
-        return Response(output_serializer.data, status=status.HTTP_200_OK)
-
-
-class OptimizationPreviewOutputSerializer(serializers.Serializer):
+class OptimizationPreviewOutputSerializer(
+    serializers.Serializer
+):
     run_id = serializers.UUIDField()
     campaign_id = serializers.UUIDField()
     campaign_revision = serializers.IntegerField()
     feasible = serializers.BooleanField()
-    makespan_hours = serializers.DecimalField(max_digits=12, decimal_places=2, allow_null=True)
-    risk = serializers.ChoiceField(choices=Risk.choices)
-    duration_ms = serializers.IntegerField(allow_null=True)
+
+    makespan_hours = serializers.DecimalField(max_digits=12, decimal_places=2, allow_null=True,)
+    risk = serializers.ChoiceField(choices=Risk.choices,)
+    duration_ms = serializers.IntegerField(allow_null=True,)
     engine_version = serializers.CharField()
     output = serializers.JSONField()
-    diff = serializers.ListField(child=serializers.DictField())
+    diff = serializers.ListField(child=serializers.DictField(),)
 
 
 class OptimizationPreviewApi(APIView):
@@ -134,20 +154,101 @@ class OptimizationPreviewApi(APIView):
 
         optimization_run, diff = OptimizerService.preview(campaign=campaign, user=request.user,)
 
-        output = optimization_run.output_json
-
         data = {
             "run_id": optimization_run.id,
-            "campaign_id": campaign.id,
-            "campaign_revision": optimization_run.campaign_revision,
+            "campaign_id": optimization_run.campaign_id,
+            "campaign_revision": (optimization_run.campaign_revision),
             "feasible": optimization_run.feasible,
             "makespan_hours": optimization_run.makespan_hours,
             "risk": optimization_run.risk,
             "duration_ms": optimization_run.duration_ms,
             "engine_version": optimization_run.engine_version,
-            "output": output,
+            "output": optimization_run.output_json,
             "diff": diff,
         }
 
-        serializer = OptimizationPreviewOutputSerializer(instance=data)
-        return Response(serializer.data, status=status.HTTP_200_OK)
+        serializer = OptimizationPreviewOutputSerializer(instance=data,)
+
+        return Response(serializer.data, status=status.HTTP_200_OK,)
+
+
+class OptimizationApplyApi(APIView):
+    permission_classes = [IsAuthenticated]
+
+    DATETIME_FIELDS = {
+        "planned_start",
+        "planned_end",
+        "latest_start_at",
+        "due_at",
+        "must_finish_by",
+    }
+
+    STRING_FIELDS = {
+        "task_id",
+        "assignee_id",
+        "slack_hours",
+    }
+
+    @classmethod
+    def serialize_edits(cls, edits):
+        if edits is None:
+            return None
+
+        serialized_edits = []
+
+        for item in edits:
+            serialized_item = {}
+
+            for field, value in item.items():
+                if value is None:
+                    serialized_item[field] = None
+
+                elif field in cls.DATETIME_FIELDS:
+                    serialized_item[field] = value.isoformat()
+
+                elif field in cls.STRING_FIELDS:
+                    serialized_item[field] = str(value)
+
+                else:
+                    serialized_item[field] = value
+
+            serialized_edits.append(serialized_item)
+
+        return serialized_edits
+
+    def post(self, request, run_id):
+        workspace = getattr(request, "workspace", None)
+
+        if workspace is None:
+            raise ValidationError({
+                "workspace": "Workspace context is required."
+            })
+
+        serializer = OptimizationApplyInputSerializer(data=request.data,)
+
+        serializer.is_valid(raise_exception=True)
+
+        run_exists = OptimizationRun.objects.filter(
+            id=run_id,
+            campaign__workspace=workspace,
+            campaign__is_archived=False,
+        ).exists()
+
+        if not run_exists:
+            raise NotFound("Optimization run not found.")
+
+        edits = self.serialize_edits(serializer.validated_data.get("edits"),)
+
+        optimization_run = apply_optimization_run(
+            run=run_id,
+            user=request.user,
+            edits=edits,
+        )
+
+        optimization_run.refresh_from_db()
+
+        optimization_run.campaign.refresh_from_db(fields=["revision"],)
+
+        output_serializer = OptimizationApplyOutputSerializer(instance=optimization_run,)
+
+        return Response(output_serializer.data, status=status.HTTP_200_OK,)

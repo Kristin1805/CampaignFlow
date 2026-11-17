@@ -1,6 +1,6 @@
-
-from datetime import date
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 from django.db.models import Count, DecimalField, Sum, Value
 from django.db.models.functions import Coalesce
@@ -154,35 +154,54 @@ class TaskWorkloadSelector:
 
         Completed and cancelled tasks are excluded.
 
-        A task is included when its planned date range overlaps
+        The optimization period is evaluated using the workspace
+        timezone.
+
+        A task is included when its planned interval overlaps
         the requested period.
 
-        The returned busy hours are based on estimated_hours.
-        They do not represent exact calendar bookings.
+        Busy hours are based on estimated_hours and do not
+        represent exact calendar bookings.
         """
+        if start_date > end_date:
+            raise ValueError(
+                "Start date must be on or before end date."
+            )
+
+        workspace_timezone = ZoneInfo(workspace.timezone)
+
+        period_start = datetime.combine(
+            start_date,
+            time.min,
+            tzinfo=workspace_timezone,
+        )
+
+        period_end = datetime.combine(
+            end_date + timedelta(days=1),
+            time.min,
+            tzinfo=workspace_timezone,
+        )
+
         queryset = (
             Task.objects.filter(
                 campaign__workspace=workspace,
                 campaign__is_archived=False,
                 assignee__isnull=False,
-                planned_start__date__lte=end_date,
-                planned_end__date__gte=start_date,
+                planned_start__isnull=False,
+                planned_end__isnull=False,
+                planned_start__lt=period_end,
+                planned_end__gt=period_start,
             )
-            .exclude(
-                status__in=cls.EXCLUDED_STATUSES
-            )
-            .exclude(
-                campaign=campaign
-            )
+            .exclude(status__in=cls.EXCLUDED_STATUSES,)
+            .exclude(campaign=campaign,)
         )
 
         if member_ids is not None:
-            queryset = queryset.filter(
-                assignee_id__in=member_ids
-            )
+            queryset = queryset.filter(assignee_id__in=member_ids)
 
         rows = (
-            queryset.values("assignee_id")
+            queryset.order_by()
+            .values("assignee_id")
             .annotate(
                 busy_hours=Coalesce(
                     Sum("estimated_hours"),
@@ -334,8 +353,8 @@ class TaskCommentSelector:
     def get_comment(*, task, comment_id):
         return (
             TaskComment.objects.filter(
-                id=comment_id,
                 task=task,
+                comment_id=comment_id,
             )
             .select_related("author")
             .first()

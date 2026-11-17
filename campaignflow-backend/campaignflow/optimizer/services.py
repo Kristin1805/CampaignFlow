@@ -5,12 +5,12 @@ import time
 import uuid
 from collections import defaultdict
 from datetime import datetime
-from zoneinfo import ZoneInfo
+from decimal import Decimal, InvalidOperation
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from django.conf import settings
 from jsonschema import Draft202012Validator, FormatChecker
 from jsonschema.exceptions import SchemaError
-from decimal import Decimal, InvalidOperation
 
 from django.db import transaction
 from django.core.exceptions import ValidationError as DjangoValidationError
@@ -123,17 +123,22 @@ class OptimizerService:
         if campaign.launch_at is None or campaign.launch_at <= now:
             raise ValidationError({"launch_at": "Campaign launch date must be in the future."})
         workspace = campaign.workspace
-        workspace_timezone = ZoneInfo(workspace.timezone)
+        try:
+            workspace_timezone = ZoneInfo(workspace.timezone)
+        except (ZoneInfoNotFoundError, TypeError, ValueError) as exc:
+            logger.exception("Invalid workspace timezone.")
+            raise OptimizerInternalError("Invalid workspace timezone.") from exc
         local_now = timezone.localtime(now, workspace_timezone)
         deadline = timezone.localtime(campaign.launch_at, workspace_timezone)
         tasks = OptimizerSelector.get_tasks(campaign=campaign)
         dependencies = OptimizerSelector.get_dependencies(campaign=campaign, task_ids={task.id for task in tasks})
         grouped = cls.get_dependencies_by_task(dependencies)
         members = OptimizerSelector.get_members(workspace=workspace)
-        busy_hours = TaskWorkloadSelector.get_optimizer_busy_hours(
-            workspace=workspace, campaign=campaign, start_date=local_now.date(),
-            end_date=deadline.date(), member_ids=[member.id for member in members],
-        )
+        with timezone.override(workspace_timezone):
+            busy_hours = TaskWorkloadSelector.get_optimizer_busy_hours(
+                workspace=workspace, campaign=campaign, start_date=local_now.date(),
+                end_date=deadline.date(), member_ids=[member.id for member in members],
+            )
         return {
             "campaign_id": str(campaign.id),
             "now": local_now.isoformat(),
@@ -178,6 +183,10 @@ class OptimizerService:
             "details": {**details, **{key: value for key, value in output.items() if key not in {"code", "message", "details"}}},
         }
 
+    @staticmethod
+    def reject_json_constant(value):
+        raise ValueError(f"Non-finite JSON number: {value}")
+
     @classmethod
     def run(cls, *, command, payload):
         executable = getattr(settings, "CFENGINE_PATH", None)
@@ -193,12 +202,12 @@ class OptimizerService:
         except subprocess.TimeoutExpired as exc:
             logger.warning("Optimization engine timed out after %s seconds.", timeout)
             raise OptimizerTimeout({"code": "optimizer_timeout", "message": "Optimization exceeded the time limit."}) from exc
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, TypeError) as exc:
             logger.exception("Could not execute optimization engine.")
             raise OptimizerInternalError("Could not execute optimization engine.") from exc
         duration_ms = int((time.monotonic() - started) * 1000)
         try:
-            output = json.loads(result.stdout)
+            output = json.loads(result.stdout, parse_constant=cls.reject_json_constant)
         except (ValueError, TypeError) as exc:
             logger.error("Invalid engine JSON; exit code: %s", result.returncode)
             raise OptimizerInternalError("Optimization engine returned invalid JSON.") from exc
@@ -275,8 +284,20 @@ class OptimizerService:
         for item in output["schedule"]:
             if item["assignee_id"] is not None and item["assignee_id"] not in member_ids:
                 raise OptimizerInternalError("Schedule contains an unknown assignee.")
-            if parse_datetime(item["start"]) > parse_datetime(item["end"]):
-                raise OptimizerInternalError("Schedule contains an invalid date range.")
+            try:
+                start = parse_datetime(item["start"])
+                end = parse_datetime(item["end"])
+                latest = parse_datetime(item["latest_start"])
+                if any(value is None or timezone.is_naive(value) for value in (start, end, latest)) or start > end:
+                    raise ValueError("Invalid schedule dates")
+            except (ValueError, TypeError, OverflowError) as exc:
+                raise OptimizerInternalError("Schedule contains an invalid date range.") from exc
+        for field in ("order", "critical_path"):
+            ids = output[field]
+            if len(ids) != len(set(ids)) or not set(ids).issubset(task_ids):
+                raise OptimizerInternalError(f"Engine returned invalid {field}.")
+        if set(output["order"]) != task_ids:
+            raise OptimizerInternalError("Engine order does not match input tasks.")
         deadline_ids = [item["task_id"] for item in output["must_finish_by"]]
         if len(deadline_ids) != len(set(deadline_ids)) or not set(deadline_ids).issubset(task_ids):
             raise OptimizerInternalError("Engine returned invalid task deadlines.")
@@ -301,12 +322,20 @@ class OptimizerService:
             OptimizationApplyService.validate_permission(campaign=locked_campaign, user=user)
             try:
                 diff = cls.build_diff(campaign=locked_campaign, output=output)
-            except (ValidationError, InvalidOperation) as exc:
+            except (ValidationError, InvalidOperation, ValueError, OverflowError) as exc:
                 logger.exception("Engine plan cannot be represented by Django task fields.")
                 raise OptimizerInternalError("Invalid optimizer task plan.") from exc
+            try:
+                makespan = Decimal(str(output["makespan_h"])).quantize(Decimal("0.01"))
+                OptimizationRun._meta.get_field("makespan_hours").run_validators(makespan)
+                OptimizationRun._meta.get_field("engine_version").run_validators(output["engine_version"])
+                OptimizationRun._meta.get_field("duration_ms").run_validators(output.get("elapsed_ms", duration_ms))
+            except (DjangoValidationError, InvalidOperation, ValueError, OverflowError) as exc:
+                logger.exception("Engine metadata exceeds model field limits.")
+                raise OptimizerInternalError("Invalid optimizer metadata.") from exc
             optimization_run = OptimizationRun.objects.create(
                 campaign=locked_campaign, requested_by=user, input_json=payload,
-                output_json=output, feasible=True, makespan_hours=Decimal(str(output["makespan_h"])),
+                output_json=output, feasible=True, makespan_hours=makespan,
                 risk=output["risk"], engine_version=output["engine_version"],
                 duration_ms=output.get("elapsed_ms", duration_ms), campaign_revision=initial_revision,
             )
@@ -332,6 +361,9 @@ class OptimizationApplyService:
 
     @staticmethod
     def validate_permission(*, campaign, user):
+        if not user or not user.is_authenticated or not user.is_active:
+            raise PermissionDenied("An active authenticated user is required.")
+
         membership = WorkspaceMember.objects.filter(
             workspace_id=campaign.workspace_id,
             user=user,
@@ -358,7 +390,10 @@ class OptimizationApplyService:
                 field: "Expected an ISO 8601 datetime string."
             })
 
-        parsed = parse_datetime(value)
+        try:
+            parsed = parse_datetime(value)
+        except (ValueError, OverflowError) as exc:
+            raise ValidationError({field: "Invalid datetime."}) from exc
 
         if parsed is None or timezone.is_naive(parsed):
             raise ValidationError({
@@ -388,6 +423,9 @@ class OptimizationApplyService:
             raise ValidationError({
                 field: "Expected a finite decimal number."
             })
+
+        if field == "slack_hours" and result < 0:
+            raise ValidationError({field: "Slack hours cannot be negative."})
 
         if result.as_tuple().exponent < -2:
             raise ValidationError({
@@ -653,8 +691,8 @@ class OptimizationApplyService:
 
                 if previous != value:
                     changes[field] = {
-                        "old": (str(previous) if previous is not None else None),
-                        "new": (str(value) if value is not None else None),
+                        "old": OptimizerService.serialize_value(previous),
+                        "new": OptimizerService.serialize_value(value),
                     }
 
                     setattr(task, field, value)
