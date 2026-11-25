@@ -7,4 +7,5 @@ urlpatterns = [
     path("api/", include("campaignflow.campaigns.urls")),
     path("api/", include("campaignflow.approvals.urls")),
     path("api/", include("campaignflow.optimizer.urls")),
+    path("api/", include("campaignflow.content.urls")),
 ]

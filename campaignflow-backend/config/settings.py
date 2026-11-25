@@ -47,6 +47,7 @@ INSTALLED_APPS = [
     "campaignflow.analytics",
     "campaignflow.dashboard",
     "campaignflow.notifications",
+    "campaignflow.content.apps.ContentConfig",
 ]
 
 MIDDLEWARE = [
