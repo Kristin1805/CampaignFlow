@@ -1,15 +1,18 @@
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.response import Response
 
 from campaignflow.core.apis import PrivateApi
 from campaignflow.content.pagination import ContentPagination
-from campaignflow.content.services import ContentService, ContentDefinitionService
+from campaignflow.content.services import ContentService, ContentDefinitionService, ContentCalendarService
 from campaignflow.content.serializers import (
     ContentCreateSerializer, ContentUpdateSerializer, ContentOutputSerializer,
     ContentListFilterSerializer, ContentStatusInputSerializer,
     ContentStatusHistoryOutputSerializer, ContentDuplicateInputSerializer,
     ContentDefinitionInputSerializer, ContentPlatformOutputSerializer,
-    ContentFormatOutputSerializer,
+    ContentFormatOutputSerializer, BulkRescheduleOutputSerializer, BulkRescheduleInputSerializer,
+    CalendarEventSerializer, CalendarConflictsOutputSerializer, ContentRescheduleInputSerializer,
+    CalendarFilterSerializer,
 )
 
 
@@ -210,3 +213,117 @@ class ContentFormatListApi(ContentDefinitionListApi):
 class ContentFormatDetailsApi(ContentDefinitionDetailsApi):
     definition_type = "format"
     output_serializer_class = ContentFormatOutputSerializer
+
+class ContentCalendarApi(PrivateApi):
+
+    def get(self, request, workspace_id, campaign_id=None, *args, **kwargs):
+        serializer = CalendarFilterSerializer(data=request.query_params.dict())
+        serializer.is_valid(raise_exception=True)
+
+        result = ContentCalendarService.get_calendar(
+            workspace_id=workspace_id,
+            campaign_id=campaign_id,
+            user=request.user,
+            filters=serializer.validated_data,
+        )
+
+        output = ContentCalendarOutputSerializer(
+            result,
+            context={"membership": result["membership"], "now": timezone.now()},
+        )
+
+        return Response(output.data)
+
+
+class ContentCalendarSummaryApi(PrivateApi):
+
+    def get(self, request, workspace_id, *args, **kwargs):
+        serializer = CalendarFilterSerializer(data=request.query_params.dict())
+        serializer.is_valid(raise_exception=True)
+
+        result = ContentCalendarService.get_summary(
+            workspace_id=workspace_id,
+            user=request.user,
+            filters=serializer.validated_data,
+        )
+
+        return Response(CalendarSummaryOutputSerializer(result).data)
+
+
+class ContentCalendarUnscheduledApi(PrivateApi):
+
+    def get(self, request, workspace_id, *args, **kwargs):
+        serializer = CalendarUnscheduledFilterSerializer(data=request.query_params.dict())
+        serializer.is_valid(raise_exception=True)
+
+        queryset, membership = ContentCalendarService.get_unscheduled(
+            workspace_id=workspace_id,
+            user=request.user,
+            filters=serializer.validated_data,
+        )
+
+        paginator = ContentPagination()
+        page = paginator.paginate_queryset(queryset, request, view=self)
+
+        output = CalendarEventSerializer(
+            page, many=True,
+            context={"membership": membership, "now": timezone.now()},
+        )
+
+        return paginator.get_paginated_response(output.data)
+
+
+class ContentCalendarConflictsApi(PrivateApi):
+
+    def get(self, request, workspace_id, *args, **kwargs):
+        serializer = CalendarFilterSerializer(data=request.query_params.dict())
+        serializer.is_valid(raise_exception=True)
+
+        result = ContentCalendarService.get_conflicts(
+            workspace_id=workspace_id,
+            user=request.user,
+            filters=serializer.validated_data,
+        )
+
+        return Response(CalendarConflictsOutputSerializer(result).data)
+
+
+class ContentRescheduleApi(PrivateApi):
+
+    def patch(self, request, workspace_id, content_id, *args, **kwargs):
+        serializer = ContentRescheduleInputSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        content_item, membership = ContentCalendarService.reschedule(
+            workspace_id=workspace_id,
+            content_id=content_id,
+            user=request.user,
+            publication_at=serializer.validated_data["publication_at"],
+        )
+
+        output = CalendarEventSerializer(
+            content_item,
+            context={"membership": membership, "now": timezone.now()},
+        )
+
+        return Response(output.data, status=status.HTTP_200_OK)
+
+
+class ContentBulkRescheduleApi(PrivateApi):
+
+    def post(self, request, workspace_id, *args, **kwargs):
+        serializer = BulkRescheduleInputSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        result = ContentCalendarService.bulk_reschedule(
+            workspace_id=workspace_id,
+            user=request.user,
+            items=serializer.validated_data["items"],
+        )
+
+        output = BulkRescheduleOutputSerializer(
+            result,
+            context={"membership": result["membership"], "now": timezone.now()},
+        )
+
+        return Response(output.data, status=status.HTTP_200_OK)

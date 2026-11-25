@@ -4,6 +4,7 @@ from zoneinfo import ZoneInfo
 from django.db.models import Q, F
 
 from campaignflow.campaigns.models import Campaign
+from campaignflow.content.constants import CALENDAR_TERMINAL_STATUSES
 from campaignflow.content.models import ContentItem, ContentPlatform, ContentFormat, ContentStatusHistory
 from campaignflow.organization.models import WorkspaceMember
 from campaignflow.tasks.models import Task
@@ -147,3 +148,70 @@ class ContentFormatSelector:
     @staticmethod
     def get_by_id(*, workspace, format_id):
         return ContentFormat.objects.filter(id=format_id, workspace=workspace).first()
+
+class ContentCalendarSelector:
+    FILTER_FIELDS = {
+        "campaign_ids": "campaign_id__in",
+        "platform_ids": "platform_id__in",
+        "format_ids": "content_format_id__in",
+        "assignee_ids": "assignee_id__in",
+        "statuses": "status__in",
+    }
+
+    @classmethod
+    def get_filtered_queryset(cls, *, workspace, filters=None):
+        filters = filters or {}
+
+        queryset = ContentSelector.get_base_queryset(workspace=workspace).filter(is_archived=False,)
+
+        for key, field in cls.FILTER_FIELDS.items():
+            values = filters.get(key)
+
+            if values:
+                queryset = queryset.filter(**{field: values})
+
+        search = filters.get("search")
+
+        if search:
+            queryset = queryset.filter(
+                Q(title__icontains=search)
+                | Q(topic__icontains=search)
+                | Q(copy__icontains=search)
+                | Q(description__icontains=search)
+            )
+
+        if filters.get("unassigned_only"):
+            queryset = queryset.filter(assignee_id__isnull=True)
+
+        return queryset
+
+    @classmethod
+    def get_calendar_events(cls, *, workspace, period, filters=None):
+        return cls.get_filtered_queryset(workspace=workspace, filters=filters,).filter(publication_at__gte=period["start_at"], publication_at__lt=period["end_at"],).order_by("publication_at", "id")
+
+    @classmethod
+    def get_unscheduled_content(cls, *, workspace, filters=None):
+        return cls.get_filtered_queryset(workspace=workspace, filters=filters).filter(publication_at__isnull=True).exclude(status__in=CALENDAR_TERMINAL_STATUSES).order_by("-created_at", "-id")
+
+    @classmethod
+    def get_unscheduled_count(cls, *, workspace, filters=None):
+        return cls.get_unscheduled_content(workspace=workspace, filters=filters,).count()
+
+    @classmethod
+    def get_conflict_candidates(cls, *, workspace, period):
+        return cls.get_calendar_events(
+            workspace=workspace, period=period,
+        ).exclude(status__in=CALENDAR_TERMINAL_STATUSES)
+
+    @staticmethod
+    def get_locked_content_items(*, workspace, content_ids):
+        return list(
+            ContentItem.objects.select_for_update()
+            .filter(
+                id__in=content_ids,
+                campaign__workspace=workspace,
+                campaign__is_archived=False,
+                is_archived=False,
+            )
+            .order_by("id")
+        )

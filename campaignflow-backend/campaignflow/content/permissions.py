@@ -1,6 +1,7 @@
 from rest_framework.exceptions import NotFound, PermissionDenied
 
-from campaignflow.content.constants import EDITABLE_CONTENT_STATUSES, MEMBER_CONTENT_TRANSITIONS
+from campaignflow.content.constants import EDITABLE_CONTENT_STATUSES, MEMBER_CONTENT_TRANSITIONS, \
+    CALENDAR_RESCHEDULABLE_STATUSES
 from campaignflow.organization.models import WorkspaceMember
 from campaignflow.organization.selectors import WorkspaceSelector
 
@@ -60,3 +61,46 @@ class ContentPermission:
 
         if new_status not in MEMBER_CONTENT_TRANSITIONS:
             raise PermissionDenied("You cannot perform this status transition.")
+
+
+    @classmethod
+    def can_reschedule(cls, *, membership, content_item):
+        return (
+            cls.is_management(membership=membership)
+            and not content_item.is_archived
+            and not content_item.campaign.is_archived
+            and content_item.status in CALENDAR_RESCHEDULABLE_STATUSES
+        )
+
+    @classmethod
+    def require_reschedule(cls, *, membership, content_item):
+        cls.require_management(membership=membership)
+
+        if not cls.can_reschedule(membership=membership, content_item=content_item):
+            raise PermissionDenied("Content cannot be rescheduled in its current state.")
+
+    @classmethod
+    def get_calendar_actions(cls, *, membership, content_item):
+        can_edit = (
+            not content_item.is_archived
+            and not content_item.campaign.is_archived
+            and content_item.status in EDITABLE_CONTENT_STATUSES
+            and (
+                cls.is_management(membership=membership)
+                or (membership.role == WorkspaceMember.Role.MEMBER and content_item.assignee_id == membership.id)
+            )
+        )
+
+        can_reschedule = cls.can_reschedule(membership=membership, content_item=content_item,)
+
+        return {
+            "can_view": membership.role != WorkspaceMember.Role.GUEST,
+            "can_edit": can_edit,
+            "can_reschedule": can_reschedule,
+            "can_unschedule": can_reschedule and content_item.publication_at is not None,
+            "can_archive": (
+                cls.is_management(membership=membership)
+                and not content_item.is_archived
+                and not content_item.campaign.is_archived
+            ),
+        }
