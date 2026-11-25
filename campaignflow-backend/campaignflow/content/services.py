@@ -9,7 +9,7 @@ from rest_framework.exceptions import NotFound, PermissionDenied, ValidationErro
 from campaignflow.content.constants import (
     DEFAULT_CONTENT_PLATFORMS, DEFAULT_CONTENT_FORMATS,
     CONTENT_STATUS_TRANSITIONS, EDITABLE_CONTENT_STATUSES,
-    PUBLICATION_DATE_REQUIRED_STATUSES,
+    PUBLICATION_DATE_REQUIRED_STATUSES, MAX_BULK_RESCHEDULE_ITEMS,
 )
 from campaignflow.content.enums import ContentStatus
 from campaignflow.content.models import (
@@ -17,7 +17,7 @@ from campaignflow.content.models import (
 )
 from campaignflow.content.permissions import ContentPermission
 from campaignflow.content.selectors import (
-    ContentSelector, ContentPlatformSelector, ContentFormatSelector,
+    ContentSelector, ContentPlatformSelector, ContentFormatSelector, ContentCalendarSelector,
 )
 
 
@@ -504,3 +504,273 @@ class ContentDefinitionService:
             raise ValidationError({
                 "definition": "This definition is already used by existing content.",
             }) from exc
+
+
+class ContentCalendarService:
+
+    @staticmethod
+    def get_membership(*, workspace_id, user):
+        membership = ContentPermission.get_membership(
+            workspace_id=workspace_id, user=user,
+        )
+
+        ContentPermission.require_view(membership=membership)
+
+        return membership
+
+    @staticmethod
+    def prepare_filters(*, workspace, filters=None, campaign_id=None):
+        filters = dict(filters or {})
+
+        if campaign_id is not None:
+            ContentService.get_campaign(workspace=workspace, campaign_id=campaign_id)
+
+            requested_campaigns = filters.get("campaign_ids")
+
+            if requested_campaigns and set(requested_campaigns) != {campaign_id}:
+                raise ValidationError({
+                    "campaign_ids": "Campaign filter conflicts with the requested campaign.",
+                })
+
+            filters["campaign_ids"] = [campaign_id]
+
+        return filters
+
+    @staticmethod
+    def get_period(*, workspace, filters):
+        return CalendarPeriod.resolve(
+            workspace=workspace,
+            view=filters.get("view", CalendarView.MONTH),
+            reference_date=filters.get("reference_date"),
+            date_from=filters.get("date_from"),
+            date_to=filters.get("date_to"),
+        )
+
+    @staticmethod
+    def get_visible_conflicts(*, workspace, period, content_items):
+        visible_ids = {item.id for item in content_items}
+
+        if not visible_ids:
+            return []
+
+        candidates = ContentCalendarSelector.get_conflict_candidates(
+            workspace=workspace, period=period,
+        )
+
+        conflicts = CalendarConflictDetector.detect(
+            content_items=candidates,
+            timezone_name=workspace.timezone,
+        )
+
+        return [
+            conflict for conflict in conflicts
+            if visible_ids.intersection(conflict["content_ids"])
+        ]
+
+    @classmethod
+    def get_calendar(cls, *, workspace_id, user, filters=None, campaign_id=None):
+        membership = cls.get_membership(workspace_id=workspace_id, user=user)
+        workspace = membership.workspace
+
+        filters = cls.prepare_filters(
+            workspace=workspace, filters=filters, campaign_id=campaign_id,
+        )
+
+        period = cls.get_period(workspace=workspace, filters=filters)
+
+        content_items = list(
+            ContentCalendarSelector.get_calendar_events(
+                workspace=workspace, period=period, filters=filters,
+            )
+        )
+
+        unscheduled_count = ContentCalendarSelector.get_unscheduled_count(
+            workspace=workspace, filters=filters,
+        )
+
+        now = timezone.now()
+
+        days = CalendarCalculator.group_by_date(
+            content_items=content_items, period=period,
+        )
+
+        summary = CalendarCalculator.get_summary(
+            content_items=content_items,
+            period=period,
+            unscheduled_count=unscheduled_count,
+            now=now,
+        )
+
+        conflicts = cls.get_visible_conflicts(
+            workspace=workspace, period=period, content_items=content_items,
+        )
+
+        return {
+            "workspace_id": workspace.id,
+            "campaign_id": campaign_id,
+            "period": period,
+            "navigation": CalendarPeriod.get_navigation(period=period),
+            "summary": summary,
+            "days": days,
+            "conflicts": conflicts,
+            "membership": membership,
+        }
+
+    @classmethod
+    def get_summary(cls, *, workspace_id, user, filters=None):
+        membership = cls.get_membership(workspace_id=workspace_id, user=user)
+        workspace = membership.workspace
+
+        filters = cls.prepare_filters(workspace=workspace, filters=filters)
+        period = cls.get_period(workspace=workspace, filters=filters)
+
+        content_items = list(
+            ContentCalendarSelector.get_calendar_events(
+                workspace=workspace, period=period, filters=filters,
+            )
+        )
+
+        unscheduled_count = ContentCalendarSelector.get_unscheduled_count(
+            workspace=workspace, filters=filters,
+        )
+
+        return {
+            "workspace_id": workspace.id,
+            "period": period,
+            "summary": CalendarCalculator.get_summary(
+                content_items=content_items,
+                period=period,
+                unscheduled_count=unscheduled_count,
+                now=timezone.now(),
+            ),
+        }
+
+    @classmethod
+    def get_unscheduled(cls, *, workspace_id, user, filters=None):
+        membership = cls.get_membership(workspace_id=workspace_id, user=user)
+        workspace = membership.workspace
+
+        filters = cls.prepare_filters(workspace=workspace, filters=filters)
+
+        queryset = ContentCalendarSelector.get_unscheduled_content(
+            workspace=workspace, filters=filters,
+        )
+
+        return queryset, membership
+
+    @classmethod
+    def get_conflicts(cls, *, workspace_id, user, filters=None):
+        membership = cls.get_membership(workspace_id=workspace_id, user=user)
+        workspace = membership.workspace
+
+        filters = cls.prepare_filters(workspace=workspace, filters=filters)
+        period = cls.get_period(workspace=workspace, filters=filters)
+
+        content_items = list(
+            ContentCalendarSelector.get_calendar_events(
+                workspace=workspace, period=period, filters=filters,
+            )
+        )
+
+        conflicts = cls.get_visible_conflicts(
+            workspace=workspace, period=period, content_items=content_items,
+        )
+
+        return {
+            "workspace_id": workspace.id,
+            "period": period,
+            "total_conflicts": len(conflicts),
+            "conflicts": conflicts,
+        }
+
+    @classmethod
+    @transaction.atomic
+    def reschedule(cls, *, workspace_id, content_id, user, publication_at):
+        membership = cls.get_membership(workspace_id=workspace_id, user=user)
+        ContentPermission.require_management(membership=membership)
+
+        content_item = ContentService.get_content_item(workspace=membership.workspace, content_id=content_id, lock=True,)
+
+        ContentPermission.require_reschedule(membership=membership, content_item=content_item,)
+
+        if publication_at is not None and timezone.is_naive(publication_at):
+            raise ValidationError({
+                "publication_at": "Publication date must include timezone information.",
+            })
+
+        updated_item = ContentService.update(
+            workspace_id=workspace_id,
+            content_id=content_id,
+            user=user,
+            data={"publication_at": publication_at},
+        )
+
+        return updated_item, membership
+
+    @classmethod
+    @transaction.atomic
+    def bulk_reschedule(cls, *, workspace_id, user, items):
+        membership = cls.get_membership(workspace_id=workspace_id, user=user)
+        ContentPermission.require_management(membership=membership)
+
+        if not items:
+            raise ValidationError({"items": "At least one content item is required."})
+
+        if len(items) > MAX_BULK_RESCHEDULE_ITEMS:
+            raise ValidationError({
+                "items": f"Maximum {MAX_BULK_RESCHEDULE_ITEMS} items are allowed.",
+            })
+
+        content_ids = [item["content_id"] for item in items]
+
+        if len(content_ids) != len(set(content_ids)):
+            raise ValidationError({"items": "Duplicate content IDs are not allowed."})
+
+        content_items = ContentCalendarSelector.get_locked_content_items(workspace=membership.workspace, content_ids=content_ids,)
+
+        content_map = {item.id: item for item in content_items}
+
+        if set(content_ids) != set(content_map):
+            raise NotFound("One or more content items were not found.")
+
+        for item in items:
+            content_item = content_map[item["content_id"]]
+            publication_at = item["publication_at"]
+
+            ContentPermission.require_reschedule(
+                membership=membership, content_item=content_item,
+            )
+
+            if publication_at is not None and timezone.is_naive(publication_at):
+                raise ValidationError({
+                    "publication_at": "Publication date must include timezone information.",
+                })
+
+        updated_items = []
+        changed_count = 0
+
+        for item in items:
+            content_item = content_map[item["content_id"]]
+            publication_at = item["publication_at"]
+
+            if content_item.publication_at == publication_at:
+                updated_items.append(content_item)
+                continue
+
+            updated_item = ContentService.update(
+                workspace_id=workspace_id,
+                content_id=content_item.id,
+                user=user,
+                data={"publication_at": publication_at},
+            )
+
+            updated_items.append(updated_item)
+            changed_count += 1
+
+        return {
+            "workspace_id": membership.workspace_id,
+            "requested_count": len(items),
+            "updated_count": changed_count,
+            "items": updated_items,
+            "membership": membership,
+        }
