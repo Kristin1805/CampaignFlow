@@ -1,10 +1,13 @@
 from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
-from django.db.models import Q, F
+from django.db.models import Q, F, Count
+from django.utils import timezone
 
 from campaignflow.campaigns.models import Campaign
-from campaignflow.content.constants import CALENDAR_TERMINAL_STATUSES
+from campaignflow.content.calendar import CalendarPeriod
+from campaignflow.content.constants import CALENDAR_TERMINAL_STATUSES, POSTING_PLAN_ORDERING_FIELDS
+from campaignflow.content.enums import ContentStatus, PostingPlanView
 from campaignflow.content.models import ContentItem, ContentPlatform, ContentFormat, ContentStatusHistory
 from campaignflow.organization.models import WorkspaceMember
 from campaignflow.tasks.models import Task
@@ -215,3 +218,106 @@ class ContentCalendarSelector:
             )
             .order_by("id")
         )
+
+class PostingPlanSelector:
+
+    @classmethod
+    def get_queryset(cls, *, workspace, filters=None):
+        filters = filters or {}
+        queryset = ContentCalendarSelector.get_filtered_queryset(
+            workspace=workspace, filters=filters,
+        )
+
+        view = filters.get("view", PostingPlanView.ALL)
+
+        if view == PostingPlanView.UNSCHEDULED:
+            queryset = queryset.filter(publication_at__isnull=True)
+
+        elif view != PostingPlanView.ALL:
+            period = CalendarPeriod.resolve(
+                workspace=workspace,
+                view=view,
+                reference_date=filters.get("reference_date"),
+                date_from=filters.get("date_from"),
+                date_to=filters.get("date_to"),
+            )
+
+            date_filter = Q(
+                publication_at__gte=period["start_at"],
+                publication_at__lt=period["end_at"],
+            )
+
+            if filters.get("include_unscheduled"):
+                date_filter |= Q(publication_at__isnull=True)
+
+            queryset = queryset.filter(date_filter)
+
+        scheduled = filters.get("scheduled")
+
+        if scheduled is not None:
+            queryset = queryset.filter(publication_at__isnull=not scheduled)
+
+        published = filters.get("published")
+
+        if published is True:
+            queryset = queryset.filter(status=ContentStatus.PUBLISHED)
+        elif published is False:
+            queryset = queryset.exclude(status=ContentStatus.PUBLISHED)
+
+        if filters.get("overdue_only"):
+            queryset = queryset.filter(
+                publication_at__lt=timezone.now(),
+            ).exclude(status__in=CALENDAR_TERMINAL_STATUSES)
+
+        ordering = filters.get("ordering", "publication_at")
+        descending = ordering.startswith("-")
+        field = POSTING_PLAN_ORDERING_FIELDS.get(ordering.lstrip("-"), "publication_at")
+
+        expression = F(field).desc(nulls_last=True) if descending else F(field).asc(nulls_last=True)
+
+        return queryset.order_by(expression, "id")
+
+    @staticmethod
+    def get_summary(*, queryset):
+        now = timezone.now()
+
+        summary = queryset.aggregate(
+            total_publications=Count("id"),
+            scheduled=Count("id", filter=Q(publication_at__isnull=False)),
+            unscheduled=Count("id", filter=Q(publication_at__isnull=True)),
+            published=Count("id", filter=Q(status=ContentStatus.PUBLISHED)),
+            draft=Count("id", filter=Q(status=ContentStatus.DRAFT)),
+            approved=Count("id", filter=Q(status=ContentStatus.APPROVED)),
+            in_review=Count("id", filter=Q(status=ContentStatus.IN_REVIEW)),
+            unassigned=Count("id", filter=Q(assignee_id__isnull=True)),
+            overdue=Count(
+                "id",
+                filter=Q(publication_at__lt=now)
+                & ~Q(status__in=CALENDAR_TERMINAL_STATUSES),
+            ),
+        )
+
+        summary["by_platform"] = list(
+            queryset.order_by().values(
+                "platform_id", "platform__name",
+            ).annotate(total=Count("id")).order_by("-total", "platform_id")
+        )
+
+        summary["by_campaign"] = list(
+            queryset.order_by().values(
+                "campaign_id", "campaign__name",
+            ).annotate(total=Count("id")).order_by("-total", "campaign_id")
+        )
+
+        summary["by_status"] = list(
+            queryset.order_by().values("status")
+            .annotate(total=Count("id")).order_by("-total", "status")
+        )
+
+        summary["by_assignee"] = list(
+            queryset.order_by().values(
+                "assignee_id", "assignee__user__email",
+            ).annotate(total=Count("id")).order_by("-total", "assignee_id")
+        )
+
+        return summary

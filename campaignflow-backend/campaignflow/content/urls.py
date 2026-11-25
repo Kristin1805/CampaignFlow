@@ -7,7 +7,9 @@ from campaignflow.content.apis import (
     ContentFormatListApi, ContentFormatDetailsApi,
     ContentCalendarApi, ContentCalendarSummaryApi,
     ContentCalendarUnscheduledApi, ContentCalendarConflictsApi,
-    ContentRescheduleApi, ContentBulkRescheduleApi,
+    ContentRescheduleApi, ContentBulkRescheduleApi, PostingPlanListApi, PostingPlanSummaryApi, PostingPlanColumnsApi,
+    PostingPlanPreferencesApi, PostingPlanBulkCreateApi, PostingPlanBulkUpdateApi, PostingPlanDuplicateApi,
+    PostingPlanDetailsApi,
 )
 
 
@@ -33,4 +35,14 @@ urlpatterns = [
     path("workspaces/<uuid:workspace_id>/content-calendar/conflicts/", ContentCalendarConflictsApi.as_view(), name="content-calendar-conflicts"),
     path("workspaces/<uuid:workspace_id>/content/<uuid:content_id>/reschedule/", ContentRescheduleApi.as_view(), name="content-reschedule"),
     path("workspaces/<uuid:workspace_id>/content-calendar/bulk-reschedule/", ContentBulkRescheduleApi.as_view(), name="content-bulk-reschedule"),
+
+    path("workspaces/<uuid:workspace_id>/posting-plan/", PostingPlanListApi.as_view(), name="posting-plan",),
+    path("workspaces/<uuid:workspace_id>/campaigns/<uuid:campaign_id>/posting-plan/", PostingPlanListApi.as_view(), name="campaign-posting-plan",),
+    path("workspaces/<uuid:workspace_id>/posting-plan/summary/", PostingPlanSummaryApi.as_view(), name="posting-plan-summary",),
+    path("workspaces/<uuid:workspace_id>/posting-plan/columns/", PostingPlanColumnsApi.as_view(), name="posting-plan-columns",),
+    path("workspaces/<uuid:workspace_id>/posting-plan/preferences/", PostingPlanPreferencesApi.as_view(), name="posting-plan-preferences",),
+    path("workspaces/<uuid:workspace_id>/posting-plan/bulk-create/", PostingPlanBulkCreateApi.as_view(), name="posting-plan-bulk-create",),
+    path("workspaces/<uuid:workspace_id>/posting-plan/bulk-update/", PostingPlanBulkUpdateApi.as_view(), name="posting-plan-bulk-update",),
+    path("workspaces/<uuid:workspace_id>/posting-plan/<uuid:content_id>/duplicate/", PostingPlanDuplicateApi.as_view(), name="posting-plan-duplicate",),
+    path("workspaces/<uuid:workspace_id>/posting-plan/<uuid:content_id>/", PostingPlanDetailsApi.as_view(), name="posting-plan-details",),
 ]

@@ -9,15 +9,17 @@ from rest_framework.exceptions import NotFound, PermissionDenied, ValidationErro
 from campaignflow.content.constants import (
     DEFAULT_CONTENT_PLATFORMS, DEFAULT_CONTENT_FORMATS,
     CONTENT_STATUS_TRANSITIONS, EDITABLE_CONTENT_STATUSES,
-    PUBLICATION_DATE_REQUIRED_STATUSES, MAX_BULK_RESCHEDULE_ITEMS,
+    PUBLICATION_DATE_REQUIRED_STATUSES, MAX_BULK_RESCHEDULE_ITEMS, MAX_POSTING_PLAN_BULK_ITEMS,
 )
 from campaignflow.content.enums import ContentStatus
+from campaignflow.content.exceptions import PostingPlanConflict
 from campaignflow.content.models import (
-    ContentItem, ContentStatusHistory, ContentPlatform, ContentFormat,
+    ContentItem, ContentStatusHistory, ContentPlatform, ContentFormat, PostingPlanPreference,
 )
 from campaignflow.content.permissions import ContentPermission
+from campaignflow.content.posting_play import PostingPlanColumns, PostingPlanPreferences
 from campaignflow.content.selectors import (
-    ContentSelector, ContentPlatformSelector, ContentFormatSelector, ContentCalendarSelector,
+    ContentSelector, ContentPlatformSelector, ContentFormatSelector, ContentCalendarSelector, PostingPlanSelector,
 )
 
 
@@ -774,3 +776,343 @@ class ContentCalendarService:
             "items": updated_items,
             "membership": membership,
         }
+
+class PostingPlanService:
+
+    @staticmethod
+    def get_membership(*, workspace_id, user):
+        membership = ContentPermission.get_membership(
+            workspace_id=workspace_id, user=user,
+        )
+
+        ContentPermission.require_view(membership=membership)
+
+        return membership
+
+    @classmethod
+    def get_list(cls, *, workspace_id, user, filters=None, campaign_id=None):
+        membership = cls.get_membership(workspace_id=workspace_id, user=user)
+
+        filters = ContentCalendarService.prepare_filters(
+            workspace=membership.workspace,
+            filters=filters,
+            campaign_id=campaign_id,
+        )
+
+        for selected_campaign_id in filters.get("campaign_ids", []):
+            ContentService.get_campaign(
+                workspace=membership.workspace,
+                campaign_id=selected_campaign_id,
+            )
+
+        queryset = PostingPlanSelector.get_queryset(
+            workspace=membership.workspace,
+            filters=filters,
+        )
+
+        return queryset, membership
+
+    @classmethod
+    def get_summary(cls, *, workspace_id, user, filters=None, campaign_id=None):
+        queryset, membership = cls.get_list(
+            workspace_id=workspace_id,
+            user=user,
+            filters=filters,
+            campaign_id=campaign_id,
+        )
+
+        return {
+            "workspace_id": membership.workspace_id,
+            "summary": PostingPlanSelector.get_summary(queryset=queryset),
+        }
+
+    @classmethod
+    def get_columns(cls, *, workspace_id, user):
+        membership = cls.get_membership(workspace_id=workspace_id, user=user)
+
+        return {
+            "workspace_id": membership.workspace_id,
+            "columns": PostingPlanColumns.get_columns(workspace=membership.workspace),
+        }
+
+    @staticmethod
+    def validate_version(*, content_item, expected_updated_at):
+        if expected_updated_at is None or timezone.is_naive(expected_updated_at):
+            raise ValidationError({
+                "expected_updated_at": "A timezone-aware version is required.",
+            })
+
+        if content_item.updated_at != expected_updated_at:
+            raise PostingPlanConflict(
+                content_id=content_item.id,
+                updated_at=content_item.updated_at,
+            )
+
+    @classmethod
+    @transaction.atomic
+    def update(cls, *, workspace_id, content_id, user, data):
+        membership = cls.get_membership(workspace_id=workspace_id, user=user)
+
+        content_item = ContentService.get_content_item(
+            workspace=membership.workspace,
+            content_id=content_id,
+            lock=True,
+        )
+
+        data = dict(data)
+
+        expected_updated_at = data.pop("expected_updated_at", None)
+        new_status = data.pop("status", None)
+        status_comment = data.pop("status_comment", "")
+
+        if data:
+            ContentPermission.require_edit(
+                membership=membership, content_item=content_item,
+            )
+
+        if new_status is not None:
+            ContentPermission.require_status_change(
+                membership=membership,
+                content_item=content_item,
+                new_status=new_status,
+            )
+
+        cls.validate_version(
+            content_item=content_item,
+            expected_updated_at=expected_updated_at,
+        )
+
+        if not data and new_status is None:
+            raise ValidationError("At least one editable field is required.")
+
+        if "publication_at" in data:
+            ContentPermission.require_reschedule(
+                membership=membership,
+                content_item=content_item,
+            )
+
+            publication_at = data["publication_at"]
+
+            if publication_at is not None and timezone.is_naive(publication_at):
+                raise ValidationError({
+                    "publication_at": "Publication date must include timezone information.",
+                })
+
+        if data:
+            content_item = ContentService.update(
+                workspace_id=workspace_id,
+                content_id=content_id,
+                user=user,
+                data=data,
+            )
+
+        if new_status is not None:
+            content_item = ContentService.change_status(
+                workspace_id=workspace_id,
+                content_id=content_id,
+                user=user,
+                new_status=new_status,
+                comment=status_comment,
+            )
+
+        return content_item, membership
+
+    @staticmethod
+    def validate_bulk_items(*, items):
+        if not items:
+            raise ValidationError({
+                "items": "At least one item is required.",
+            })
+
+        if len(items) > MAX_POSTING_PLAN_BULK_ITEMS:
+            raise ValidationError({
+                "items": f"Maximum {MAX_POSTING_PLAN_BULK_ITEMS} items are allowed.",
+            })
+
+    @classmethod
+    @transaction.atomic
+    def bulk_update(cls, *, workspace_id, user, items):
+        membership = cls.get_membership(workspace_id=workspace_id, user=user)
+
+        cls.validate_bulk_items(items=items)
+
+        content_ids = [item["content_id"] for item in items]
+
+        if len(content_ids) != len(set(content_ids)):
+            raise ValidationError({
+                "items": "Duplicate content IDs are not allowed.",
+            })
+
+        locked_items = ContentCalendarSelector.get_locked_content_items(
+            workspace=membership.workspace,
+            content_ids=content_ids,
+        )
+
+        if len(locked_items) != len(content_ids):
+            raise NotFound("One or more content items were not found.")
+
+        updated_items = []
+
+        for item in items:
+            updated_item, _ = cls.update(
+                workspace_id=workspace_id,
+                content_id=item["content_id"],
+                user=user,
+                data=item["changes"],
+            )
+
+            updated_items.append(updated_item)
+
+        return {
+            "workspace_id": membership.workspace_id,
+            "requested_count": len(items),
+            "processed_count": len(updated_items),
+            "items": updated_items,
+            "membership": membership,
+        }
+
+    @classmethod
+    @transaction.atomic
+    def bulk_create(cls, *, workspace_id, user, items):
+        membership = cls.get_membership(workspace_id=workspace_id, user=user)
+
+        ContentPermission.require_management(membership=membership)
+
+        cls.validate_bulk_items(items=items)
+
+        created_items = []
+
+        for item in items:
+            data = dict(item)
+            campaign_id = data.pop("campaign_id")
+
+            content_item = ContentService.create(
+                workspace_id=workspace_id,
+                campaign_id=campaign_id,
+                user=user,
+                data=data,
+            )
+
+            created_items.append(content_item)
+
+        return {
+            "workspace_id": membership.workspace_id,
+            "created_count": len(created_items),
+            "items": created_items,
+            "membership": membership,
+        }
+
+    @classmethod
+    @transaction.atomic
+    def duplicate(cls, *, workspace_id, content_id, user, data=None):
+        membership = cls.get_membership(workspace_id=workspace_id, user=user)
+
+        ContentPermission.require_management(membership=membership)
+
+        data = dict(data or {})
+
+        allowed_fields = {
+            "title", "campaign_id", "platform_id",
+            "content_format_id", "publication_at",
+        }
+
+        unknown_fields = set(data) - allowed_fields
+
+        if unknown_fields:
+            raise ValidationError({
+                field: "This field cannot be modified during duplication."
+                for field in sorted(unknown_fields)
+            })
+
+        original = ContentService.get_content_item(
+            workspace=membership.workspace,
+            content_id=content_id,
+            lock=True,
+        )
+
+        if not set(data) - {"title"}:
+            duplicate = ContentService.duplicate(
+                workspace_id=workspace_id,
+                content_id=content_id,
+                user=user,
+                title=data.get("title"),
+            )
+
+            return duplicate, membership
+
+        campaign_id = data.pop("campaign_id", original.campaign_id)
+
+        duplicate_data = {
+            field: deepcopy(getattr(original, field))
+            for field in ContentService.DUPLICATE_FIELDS
+        }
+
+        duplicate_data["title"] = f"{original.title[:248]} (Copy)"
+        duplicate_data.update(data)
+        duplicate_data["status"] = ContentStatus.DRAFT
+
+        duplicate = ContentService.create(
+            workspace_id=workspace_id,
+            campaign_id=campaign_id,
+            user=user,
+            data=duplicate_data,
+        )
+
+        return duplicate, membership
+
+    @classmethod
+    def get_preferences(cls, *, workspace_id, user):
+        membership = cls.get_membership(workspace_id=workspace_id, user=user)
+
+        preference = PostingPlanPreference.objects.filter(
+            workspace=membership.workspace,
+            user=user,
+        ).first()
+
+        return PostingPlanPreferences.serialize(preference=preference)
+
+    @classmethod
+    @transaction.atomic
+    def update_preferences(cls, *, workspace_id, user, data):
+        membership = cls.get_membership(workspace_id=workspace_id, user=user)
+
+        preference, _ = PostingPlanPreference.objects.select_for_update().get_or_create(
+            workspace=membership.workspace,
+            user=user,
+            defaults=PostingPlanPreferences.get_defaults(),
+        )
+
+        allowed_fields = set(PostingPlanPreferences.get_defaults())
+        unknown_fields = set(data) - allowed_fields
+
+        if unknown_fields:
+            raise ValidationError({
+                field: "Unknown preference."
+                for field in sorted(unknown_fields)
+            })
+
+        update_fields = []
+
+        for field, value in data.items():
+            if getattr(preference, field) == value:
+                continue
+
+            setattr(preference, field, value)
+            update_fields.append(field)
+
+        if update_fields:
+            preference.save(update_fields=[*update_fields, "updated_at"])
+
+        return PostingPlanPreferences.serialize(preference=preference)
+
+    @classmethod
+    @transaction.atomic
+    def reset_preferences(cls, *, workspace_id, user):
+        membership = cls.get_membership(workspace_id=workspace_id, user=user)
+
+        PostingPlanPreference.objects.filter(
+            workspace=membership.workspace,
+            user=user,
+        ).delete()
+
+        return PostingPlanPreferences.serialize(preference=None)

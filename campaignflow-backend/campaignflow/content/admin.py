@@ -1,7 +1,7 @@
 from django.contrib import admin
 
 from campaignflow.content.models import (
-    ContentItem, ContentPlatform, ContentFormat, ContentStatusHistory,
+    ContentItem, ContentPlatform, ContentFormat, ContentStatusHistory, PostingPlanPreference,
 )
 
 
@@ -58,3 +58,22 @@ class ContentStatusHistoryAdmin(admin.ModelAdmin):
 
     def has_delete_permission(self, request, obj=None):
         return False
+
+
+@admin.register(PostingPlanPreference)
+class PostingPlanPreferenceAdmin(admin.ModelAdmin):
+    list_display = (
+        "id", "workspace", "user",
+        "default_ordering", "default_grouping", "updated_at",
+    )
+
+    list_filter = ("default_grouping", "created_at", "updated_at")
+
+    search_fields = (
+        "workspace__name",
+        "user__email",
+    )
+
+    readonly_fields = ("id", "created_at", "updated_at")
+
+    list_select_related = ("workspace", "user")
