@@ -1,11 +1,15 @@
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from rest_framework import serializers
 
 from campaignflow.content.calendar import CalendarCalculator
-from campaignflow.content.constants import MAX_BULK_RESCHEDULE_ITEMS
-from campaignflow.content.enums import ContentStatus, CalendarConflictType
+from campaignflow.content.constants import MAX_BULK_RESCHEDULE_ITEMS, POSTING_PLAN_ORDERING_CHOICES, \
+    POSTING_PLAN_COLUMN_IDS, MAX_POSTING_PLAN_BULK_ITEMS, MAX_CALENDAR_FILTER_ITEMS, POSTING_PLAN_MAX_PAGE_SIZE
+from campaignflow.content.enums import ContentStatus, CalendarConflictType, PostingPlanGrouping, CalendarView, \
+    PostingPlanView
 from campaignflow.content.models import ContentItem, ContentPlatform, ContentFormat, ContentStatusHistory
 from campaignflow.content.permissions import ContentPermission
+from campaignflow.content.posting_play import PostingPlanGroupingCalculator
 from campaignflow.content.selectors import ContentSelector
 
 
@@ -466,3 +470,321 @@ class BulkRescheduleOutputSerializer(serializers.Serializer):
     requested_count = serializers.IntegerField()
     updated_count = serializers.IntegerField()
     items = CalendarEventSerializer(many=True)
+
+class PostingPlanFilterSerializer(CalendarBaseFilterSerializer):
+    view = serializers.ChoiceField(
+        choices=PostingPlanView.choices, required=False, default=PostingPlanView.ALL,
+    )
+    reference_date = serializers.DateField(required=False)
+    date_from = serializers.DateField(required=False)
+    date_to = serializers.DateField(required=False)
+
+    scheduled = serializers.BooleanField(required=False)
+    published = serializers.BooleanField(required=False)
+    overdue_only = serializers.BooleanField(required=False, default=False)
+    include_unscheduled = serializers.BooleanField(required=False, default=False)
+
+    ordering = serializers.ChoiceField(
+        choices=POSTING_PLAN_ORDERING_CHOICES, required=False, default="publication_at",
+    )
+    grouping = serializers.ChoiceField(
+        choices=PostingPlanGrouping.choices, required=False, default=PostingPlanGrouping.NONE,
+    )
+
+    page = serializers.IntegerField(required=False, min_value=1)
+    page_size = serializers.IntegerField(
+        required=False, min_value=1, max_value=POSTING_PLAN_MAX_PAGE_SIZE,
+    )
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+
+        view = attrs.get("view", PostingPlanView.ALL)
+        date_from = attrs.get("date_from")
+        date_to = attrs.get("date_to")
+
+        if view == PostingPlanView.CUSTOM:
+            if date_from is None or date_to is None:
+                raise serializers.ValidationError({
+                    "date_range": "Custom view requires date_from and date_to.",
+                })
+
+            if date_from > date_to:
+                raise serializers.ValidationError({
+                    "date_to": "End date must not precede start date.",
+                })
+
+            if attrs.get("reference_date"):
+                raise serializers.ValidationError({
+                    "reference_date": "Reference date is not used in custom view.",
+                })
+
+        elif date_from is not None or date_to is not None:
+            raise serializers.ValidationError({
+                "date_range": "Explicit date ranges require custom view.",
+            })
+
+        if view in {PostingPlanView.ALL, PostingPlanView.UNSCHEDULED}:
+            if attrs.get("reference_date"):
+                raise serializers.ValidationError({
+                    "reference_date": "Reference date is not supported for this view.",
+                })
+
+        if view == PostingPlanView.UNSCHEDULED:
+            if attrs.get("scheduled") is True or attrs.get("overdue_only"):
+                raise serializers.ValidationError({
+                    "view": "Conflicting unscheduled content filters.",
+                })
+
+        if attrs.get("scheduled") is False and attrs.get("overdue_only"):
+            raise serializers.ValidationError({
+                "overdue_only": "Unscheduled content cannot be overdue.",
+            })
+
+        return attrs
+
+
+class PostingPlanUpdateSerializer(ContentUpdateSerializer):
+    expected_updated_at = CalendarAwareDateTimeField()
+    publication_at = CalendarAwareDateTimeField(required=False, allow_null=True)
+
+    status = serializers.ChoiceField(
+        choices=ContentStatus.choices, required=False,
+    )
+
+    status_comment = serializers.CharField(
+        required=False, allow_blank=True, max_length=5000,
+    )
+
+    def get_fields(self):
+        fields = super().get_fields()
+
+        for field_name, field in fields.items():
+            if field_name != "expected_updated_at":
+                field.required = False
+
+        return fields
+
+    def validate(self, attrs):
+        changed_fields = set(attrs) - {"expected_updated_at", "status_comment"}
+
+        if not changed_fields:
+            raise serializers.ValidationError("At least one editable field is required.")
+
+        if "status_comment" in attrs and "status" not in attrs:
+            raise serializers.ValidationError({
+                "status_comment": "A status change is required.",
+            })
+
+        return attrs
+
+
+class PostingPlanBulkUpdateItemSerializer(StrictSerializer):
+    content_id = serializers.UUIDField()
+    changes = PostingPlanUpdateSerializer()
+
+
+class PostingPlanBulkUpdateSerializer(StrictSerializer):
+    items = PostingPlanBulkUpdateItemSerializer(
+        many=True, allow_empty=False, max_length=MAX_POSTING_PLAN_BULK_ITEMS,
+    )
+
+    def validate_items(self, items):
+        content_ids = [item["content_id"] for item in items]
+
+        if len(content_ids) != len(set(content_ids)):
+            raise serializers.ValidationError("Duplicate content IDs are not allowed.")
+
+        return items
+
+
+class PostingPlanCreateSerializer(ContentCreateSerializer):
+    campaign_id = serializers.UUIDField()
+    publication_at = CalendarAwareDateTimeField(required=False, allow_null=True)
+
+
+class PostingPlanBulkCreateSerializer(StrictSerializer):
+    items = PostingPlanCreateSerializer(
+        many=True, allow_empty=False, max_length=MAX_POSTING_PLAN_BULK_ITEMS,
+    )
+
+
+class PostingPlanDuplicateSerializer(StrictSerializer):
+    title = serializers.CharField(max_length=255, required=False)
+    campaign_id = serializers.UUIDField(required=False)
+    platform_id = serializers.UUIDField(required=False)
+    content_format_id = serializers.UUIDField(required=False)
+    publication_at = CalendarAwareDateTimeField(required=False, allow_null=True)
+
+
+class PostingPlanPreferenceSerializer(StrictSerializer):
+    visible_columns = serializers.ListField(
+        child=serializers.ChoiceField(choices=POSTING_PLAN_COLUMN_IDS),
+        required=False, allow_empty=False,
+        max_length=len(POSTING_PLAN_COLUMN_IDS),
+    )
+
+    column_order = serializers.ListField(
+        child=serializers.ChoiceField(choices=POSTING_PLAN_COLUMN_IDS),
+        required=False, allow_empty=False,
+        max_length=len(POSTING_PLAN_COLUMN_IDS),
+    )
+
+    column_widths = serializers.DictField(
+        child=serializers.IntegerField(min_value=50, max_value=1500),
+        required=False,
+    )
+
+    default_ordering = serializers.ChoiceField(
+        choices=POSTING_PLAN_ORDERING_CHOICES, required=False,
+    )
+
+    default_grouping = serializers.ChoiceField(
+        choices=PostingPlanGrouping.choices, required=False,
+    )
+
+    default_filters = serializers.DictField(required=False)
+
+    def validate_visible_columns(self, value):
+        if len(value) != len(set(value)):
+            raise serializers.ValidationError("Duplicate columns are not allowed.")
+
+        return value
+
+    def validate_column_order(self, value):
+        if len(value) != len(set(value)):
+            raise serializers.ValidationError("Duplicate columns are not allowed.")
+
+        if set(value) != set(POSTING_PLAN_COLUMN_IDS):
+            raise serializers.ValidationError("Column order must contain every available column.")
+
+        return value
+
+    def validate_column_widths(self, value):
+        unknown_columns = set(value) - set(POSTING_PLAN_COLUMN_IDS)
+
+        if unknown_columns:
+            raise serializers.ValidationError({
+                field: "Unknown column." for field in sorted(unknown_columns)
+            })
+
+        return value
+
+    def validate_default_filters(self, value):
+        forbidden_fields = {"page", "page_size", "ordering", "grouping"}
+
+        if forbidden_fields.intersection(value):
+            raise serializers.ValidationError(
+                "Pagination, ordering and grouping cannot be stored as filters.",
+            )
+
+        serializer = PostingPlanFilterSerializer(data=value)
+        serializer.is_valid(raise_exception=True)
+
+        return value
+
+    def validate(self, attrs):
+        if not attrs:
+            raise serializers.ValidationError("At least one preference is required.")
+
+        return attrs
+
+
+class PostingPlanRowSerializer(ContentOutputSerializer):
+    publication_date = serializers.SerializerMethodField()
+    publication_time = serializers.SerializerMethodField()
+    is_overdue = serializers.SerializerMethodField()
+    actions = serializers.SerializerMethodField()
+    group = serializers.SerializerMethodField()
+
+    class Meta(ContentOutputSerializer.Meta):
+        fields = ContentOutputSerializer.Meta.fields + (
+            "publication_date",
+            "publication_time",
+            "is_overdue",
+            "actions",
+            "group",
+        )
+
+    def get_local_datetime(self, obj):
+        if obj.publication_at is None:
+            return None
+
+        from zoneinfo import ZoneInfo
+
+        return obj.publication_at.astimezone(
+            ZoneInfo(obj.campaign.workspace.timezone),
+        )
+
+    def get_publication_date(self, obj):
+        local_datetime = self.get_local_datetime(obj)
+
+        return local_datetime.date().isoformat() if local_datetime else None
+
+    def get_publication_time(self, obj):
+        local_datetime = self.get_local_datetime(obj)
+
+        return local_datetime.strftime("%H:%M:%S") if local_datetime else None
+
+    def get_is_overdue(self, obj):
+        return CalendarCalculator.is_overdue(
+            content_item=obj,
+            now=self.context.get("now") or timezone.now(),
+        )
+
+    def get_actions(self, obj):
+        from campaignflow.content.constants import (
+            CONTENT_STATUS_TRANSITIONS,
+            MEMBER_CONTENT_TRANSITIONS,
+        )
+        from campaignflow.content.services import ContentService
+
+        membership = self.context["membership"]
+
+        actions = ContentPermission.get_calendar_actions(
+            membership=membership, content_item=obj,
+        )
+
+        is_management = ContentPermission.is_management(membership=membership)
+
+        editable_fields = set()
+
+        if actions["can_edit"]:
+            editable_fields = set(ContentService.EDITABLE_FIELDS)
+
+            if not is_management:
+                editable_fields -= ContentService.MEMBER_RESTRICTED_FIELDS
+
+            if not actions["can_reschedule"]:
+                editable_fields.discard("publication_at")
+
+        allowed_transitions = set(CONTENT_STATUS_TRANSITIONS.get(obj.status, set()))
+
+        if not is_management:
+            if actions["can_edit"]:
+                allowed_transitions &= MEMBER_CONTENT_TRANSITIONS
+            else:
+                allowed_transitions = set()
+
+        if obj.publication_at is None:
+            from campaignflow.content.constants import PUBLICATION_DATE_REQUIRED_STATUSES
+
+            allowed_transitions -= PUBLICATION_DATE_REQUIRED_STATUSES
+
+        if obj.is_archived or obj.campaign.is_archived:
+            allowed_transitions = set()
+
+        return {
+            **actions,
+            "can_duplicate": is_management and not obj.is_archived and not obj.campaign.is_archived,
+            "can_change_status": bool(allowed_transitions),
+            "editable_fields": sorted(editable_fields),
+            "allowed_statuses": sorted(allowed_transitions),
+        }
+
+    def get_group(self, obj):
+        return PostingPlanGroupingCalculator.get_group(
+            content_item=obj,
+            grouping=self.context.get("grouping", PostingPlanGrouping.NONE),
+            timezone_name=obj.campaign.workspace.timezone,
+        )

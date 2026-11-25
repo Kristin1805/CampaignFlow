@@ -4,7 +4,8 @@ from rest_framework.response import Response
 
 from campaignflow.core.apis import PrivateApi
 from campaignflow.content.pagination import ContentPagination
-from campaignflow.content.services import ContentService, ContentDefinitionService, ContentCalendarService
+from campaignflow.content.services import ContentService, ContentDefinitionService, ContentCalendarService, \
+    PostingPlanService
 from campaignflow.content.serializers import (
     ContentCreateSerializer, ContentUpdateSerializer, ContentOutputSerializer,
     ContentListFilterSerializer, ContentStatusInputSerializer,
@@ -12,7 +13,7 @@ from campaignflow.content.serializers import (
     ContentDefinitionInputSerializer, ContentPlatformOutputSerializer,
     ContentFormatOutputSerializer, BulkRescheduleOutputSerializer, BulkRescheduleInputSerializer,
     CalendarEventSerializer, CalendarConflictsOutputSerializer, ContentRescheduleInputSerializer,
-    CalendarFilterSerializer,
+    CalendarFilterSerializer, PostingPlanDuplicateSerializer, PostingPlanRowSerializer,
 )
 
 
@@ -327,3 +328,197 @@ class ContentBulkRescheduleApi(PrivateApi):
         )
 
         return Response(output.data, status=status.HTTP_200_OK)
+
+class PostingPlanListApi(PrivateApi):
+
+    def get(self, request, workspace_id, campaign_id=None, *args, **kwargs):
+        serializer = PostingPlanFilterSerializer(data=request.query_params.dict())
+        serializer.is_valid(raise_exception=True)
+
+        filters = serializer.validated_data
+
+        queryset, membership = PostingPlanService.get_list(
+            workspace_id=workspace_id,
+            campaign_id=campaign_id,
+            user=request.user,
+            filters=filters,
+        )
+
+        paginator = PostingPlanPagination()
+        page = paginator.paginate_queryset(queryset, request, view=self)
+
+        rows = PostingPlanRowSerializer(
+            page,
+            many=True,
+            context={
+                "membership": membership,
+                "now": timezone.now(),
+                "grouping": filters.get("grouping", "none"),
+            },
+        ).data
+
+        response = paginator.get_paginated_response(rows)
+
+        response.data["workspace_id"] = str(membership.workspace_id)
+        response.data["campaign_id"] = str(campaign_id) if campaign_id else None
+        response.data["timezone"] = membership.workspace.timezone
+        response.data["grouping"] = filters.get("grouping", "none")
+        response.data["groups"] = PostingPlanGroupingCalculator.group_rows(rows=rows)
+
+        return response
+
+
+class PostingPlanSummaryApi(PrivateApi):
+
+    def get(self, request, workspace_id, *args, **kwargs):
+        serializer = PostingPlanFilterSerializer(data=request.query_params.dict())
+        serializer.is_valid(raise_exception=True)
+
+        result = PostingPlanService.get_summary(
+            workspace_id=workspace_id,
+            user=request.user,
+            filters=serializer.validated_data,
+        )
+
+        return Response(result)
+
+
+class PostingPlanColumnsApi(PrivateApi):
+
+    def get(self, request, workspace_id, *args, **kwargs):
+        result = PostingPlanService.get_columns(
+            workspace_id=workspace_id,
+            user=request.user,
+        )
+
+        return Response(result)
+
+
+class PostingPlanPreferencesApi(PrivateApi):
+
+    def get(self, request, workspace_id, *args, **kwargs):
+        result = PostingPlanService.get_preferences(
+            workspace_id=workspace_id,
+            user=request.user,
+        )
+
+        return Response(result)
+
+    def patch(self, request, workspace_id, *args, **kwargs):
+        serializer = PostingPlanPreferenceSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        result = PostingPlanService.update_preferences(
+            workspace_id=workspace_id,
+            user=request.user,
+            data=serializer.validated_data,
+        )
+
+        return Response(result)
+
+    def delete(self, request, workspace_id, *args, **kwargs):
+        PostingPlanService.reset_preferences(
+            workspace_id=workspace_id,
+            user=request.user,
+        )
+
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class PostingPlanDetailsApi(PrivateApi):
+
+    def patch(self, request, workspace_id, content_id, *args, **kwargs):
+        serializer = PostingPlanUpdateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        content_item, membership = PostingPlanService.update(
+            workspace_id=workspace_id,
+            content_id=content_id,
+            user=request.user,
+            data=serializer.validated_data,
+        )
+
+        output = PostingPlanRowSerializer(
+            content_item,
+            context={"membership": membership, "now": timezone.now()},
+        )
+
+        return Response(output.data)
+
+
+class PostingPlanBulkCreateApi(PrivateApi):
+
+    def post(self, request, workspace_id, *args, **kwargs):
+        serializer = PostingPlanBulkCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        result = PostingPlanService.bulk_create(
+            workspace_id=workspace_id,
+            user=request.user,
+            items=serializer.validated_data["items"],
+        )
+
+        output = PostingPlanRowSerializer(
+            result["items"],
+            many=True,
+            context={
+                "membership": result["membership"],
+                "now": timezone.now(),
+            },
+        )
+
+        return Response({
+            "workspace_id": result["workspace_id"],
+            "created_count": result["created_count"],
+            "items": output.data,
+        }, status=status.HTTP_201_CREATED)
+
+
+class PostingPlanBulkUpdateApi(PrivateApi):
+
+    def patch(self, request, workspace_id, *args, **kwargs):
+        serializer = PostingPlanBulkUpdateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        result = PostingPlanService.bulk_update(
+            workspace_id=workspace_id,
+            user=request.user,
+            items=serializer.validated_data["items"],
+        )
+
+        output = PostingPlanRowSerializer(
+            result["items"],
+            many=True,
+            context={
+                "membership": result["membership"],
+                "now": timezone.now(),
+            },
+        )
+
+        return Response({
+            "workspace_id": result["workspace_id"],
+            "requested_count": result["requested_count"],
+            "processed_count": result["processed_count"],
+            "items": output.data,
+        })
+
+
+class PostingPlanDuplicateApi(PrivateApi):
+
+    def post(self, request, workspace_id, content_id, *args, **kwargs):
+        serializer = PostingPlanDuplicateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        content_item, membership = PostingPlanService.duplicate(
+            workspace_id=workspace_id,
+            content_id=content_id,
+            user=request.user,
+            data=serializer.validated_data,
+        )
+
+        output = PostingPlanRowSerializer(
+            content_item,
+            context={"membership": membership, "now": timezone.now()},
+        )
+
+        return Response(output.data, status=status.HTTP_201_CREATED)

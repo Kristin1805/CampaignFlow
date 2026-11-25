@@ -177,3 +177,32 @@ class ContentStatusHistory(models.Model):
 
     def __str__(self):
         return f"{self.previous_status} -> {self.new_status}"
+
+
+class PostingPlanPreference(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("organization.Workspace", on_delete=models.CASCADE, related_name="posting_plan_preferences")
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="posting_plan_preferences")
+
+    visible_columns = models.JSONField(default=list, blank=True)
+    column_order = models.JSONField(default=list, blank=True)
+    column_widths = models.JSONField(default=dict, blank=True)
+
+    default_ordering = models.CharField(max_length=100, default="publication_at")
+    default_grouping = models.CharField(max_length=50, default="none")
+    default_filters = models.JSONField(default=dict, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["workspace", "user"],
+                name="unique_posting_plan_preference",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.workspace_id} - {self.user_id}"
+
