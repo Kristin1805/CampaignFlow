@@ -17,7 +17,11 @@ from campaignflow.documents.constants import (
     MAX_TEMPLATE_STRUCTURE_BYTES,
     TEMPLATE_SCHEMA_VERSION,
     SECTION_FIELD_TYPES,
+    MAX_DOCUMENT_CONTENT_BYTES,
+    MAX_DOCUMENT_TABLE_ROWS,
+    MAX_DOCUMENT_TOTAL_ROWS,
 )
+
 from campaignflow.documents.enums import DocumentSectionType, DocumentFieldType
 from campaignflow.documents.placeholders import DocumentPlaceholderRegistry
 
@@ -358,3 +362,155 @@ class DocumentTemplateValidator:
 
 def validate_template_structure(value):
     DocumentTemplateValidator.validate(value)
+
+
+def validate_document_period(*, period_start, period_end):
+    if bool(period_start) != bool(period_end):
+        raise ValidationError("Both reporting period dates are required.")
+
+    if period_start and period_end and period_start > period_end:
+        raise ValidationError("End date cannot be before start date.")
+
+
+def validate_document_content(*, structure, content):
+    validator = DocumentTemplateValidator
+
+    validator.validate(structure)
+
+    try:
+        encoded = json.dumps(
+            content, ensure_ascii=False, allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeError, RecursionError):
+        raise ValidationError("Document content must contain valid JSON.")
+
+    if len(encoded) > MAX_DOCUMENT_CONTENT_BYTES:
+        raise ValidationError("Document content exceeds the maximum allowed size.")
+
+    validator.validate_keys(
+        content, {"schema_version", "sections"}, "content",
+    )
+
+    if content.get("schema_version") != structure["schema_version"]:
+        raise ValidationError("Document schema version does not match its structure.")
+
+    sections = content.get("sections")
+
+    if not isinstance(sections, dict):
+        raise ValidationError("Document sections must be an object.")
+
+    definitions = {
+        section["id"]: section for section in structure["sections"]
+    }
+
+    if set(sections) != set(definitions):
+        raise ValidationError("Document sections do not match the template structure.")
+
+    total_rows = 0
+
+    for section_id, definition in definitions.items():
+        value = sections[section_id]
+        section_type = definition["type"]
+        path = f"content.sections.{section_id}"
+
+        if section_type == DocumentSectionType.TABLE:
+            if not isinstance(value, list):
+                validator.fail(path, "Expected a list of table rows.")
+
+            if len(value) > MAX_DOCUMENT_TABLE_ROWS:
+                validator.fail(path, "Table row limit exceeded.")
+
+            total_rows += len(value)
+
+            columns = {
+                column["id"]: column for column in definition["columns"]
+            }
+
+            row_ids = set()
+
+            for index, row in enumerate(value):
+                row_path = f"{path}[{index}]"
+
+                validator.validate_keys(row, {"id", "cells"}, row_path)
+                validator.validate_default(
+                    row.get("id"), DocumentFieldType.REFERENCE,
+                    f"{row_path}.id",
+                )
+
+                row_id = row.get("id")
+
+                if not row_id or row_id in row_ids:
+                    validator.fail(row_path, "Invalid or duplicate row identifier.")
+
+                row_ids.add(row_id)
+
+                cells = row.get("cells")
+
+                if not isinstance(cells, dict) or set(cells) != set(columns):
+                    validator.fail(row_path, "Invalid table cells.")
+
+                for column_id, column in columns.items():
+                    validator.validate_default(
+                        cells[column_id],
+                        column["type"],
+                        f"{row_path}.cells.{column_id}",
+                        column.get("options"),
+                    )
+
+        elif section_type == DocumentSectionType.KEY_VALUE:
+            fields = {
+                field["id"]: field for field in definition["fields"]
+            }
+
+            if not isinstance(value, dict) or set(value) != set(fields):
+                validator.fail(path, "Invalid section fields.")
+
+            for field_id, field in fields.items():
+                validator.validate_default(
+                    value[field_id], field["type"],
+                    f"{path}.{field_id}", field.get("options"),
+                )
+
+        elif section_type == DocumentSectionType.CHECKLIST:
+            if not isinstance(value, dict):
+                validator.fail(path, "Expected a checklist object.")
+
+            if set(value) != set(definition["items"]):
+                validator.fail(path, "Checklist items do not match the structure.")
+
+            for item, checked in value.items():
+                validator.validate_boolean(checked, f"{path}.{item}")
+
+        elif section_type == DocumentSectionType.SELECT:
+            validator.validate_default(
+                value, DocumentFieldType.CHOICE,
+                path, definition["options"],
+            )
+
+        elif section_type == DocumentSectionType.MULTI_SELECT:
+            if not isinstance(value, list):
+                validator.fail(path, "Expected a list of selected options.")
+
+            if any(
+                not isinstance(item, str) or item not in definition["options"]
+                for item in value
+            ):
+                validator.fail(path, "Invalid selected option.")
+
+            if len(value) != len(set(value)):
+                validator.fail(path, "Duplicate selected options.")
+
+        elif section_type == DocumentSectionType.HEADING:
+            if value is not None:
+                validator.fail(path, "Heading sections cannot contain values.")
+
+        elif section_type in SECTION_FIELD_TYPES:
+            validator.validate_default(
+                value, SECTION_FIELD_TYPES[section_type], path,
+            )
+
+        else:
+            validator.fail(path, "Unsupported document section type.")
+
+    if total_rows > MAX_DOCUMENT_TOTAL_ROWS:
+        raise ValidationError("Document table row limit exceeded.")

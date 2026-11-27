@@ -50,3 +50,8 @@ class DocumentTemplateStatus(models.TextChoices):
     DRAFT = "draft", "Draft"
     PUBLISHED = "published", "Published"
     ARCHIVED = "archived", "Archived"
+
+class DocumentStatus(models.TextChoices):
+    DRAFT = "draft", "Draft"
+    IN_PROGRESS = "in_progress", "In progress"
+    COMPLETED = "completed", "Completed"

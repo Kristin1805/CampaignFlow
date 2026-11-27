@@ -2,13 +2,12 @@ import mimetypes
 from pathlib import Path
 from copy import deepcopy
 
-from django.db import transaction
 from django.utils import timezone
 from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
 
 from campaignflow.documents.models import TaskAttachment
-from campaignflow.documents.permissions import TaskAttachmentPermission
-from campaignflow.documents.selectors import TaskAttachmentSelector
+from campaignflow.documents.permissions import TaskAttachmentPermission, DocumentPermission
+from campaignflow.documents.selectors import TaskAttachmentSelector, DocumentSelector
 from campaignflow.tasks.models import TaskActivityType
 from campaignflow.tasks.services import TaskActivityService
 
@@ -21,7 +20,15 @@ from campaignflow.documents.models import DocumentTemplate, DocumentTemplateVers
 from campaignflow.documents.permissions import DocumentTemplatePermission
 from campaignflow.documents.selectors import DocumentTemplateSelector
 from campaignflow.documents.validators import DocumentTemplateValidator
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db import IntegrityError, transaction
 
+from campaignflow.documents.constants import DOCUMENT_STATUS_TRANSITIONS
+from campaignflow.documents.enums import DocumentStatus, DocumentTemplateCategory
+from campaignflow.documents.generators import DocumentGenerator
+from campaignflow.documents.models import Document, default_template_structure
+from campaignflow.documents.permissions import DocumentPermission
+from campaignflow.documents.selectors import DocumentSelector
 
 class TaskAttachmentService:
     MAX_FILE_SIZE = 20 * 1024 * 1024
@@ -634,3 +641,568 @@ class DocumentTemplateService:
             )
 
         return template, membership
+
+class DocumentService:
+
+    EDITABLE_METADATA_FIELDS = {
+        "title",
+        "description",
+        "category",
+        "owner_id",
+        "period_start",
+        "period_end",
+    }
+
+    GENERATION_FIELDS = {
+        "campaign_id",
+        "template_id",
+        "template_version_id",
+        "title",
+        "description",
+        "owner_id",
+        "period_start",
+        "period_end",
+        "populate_placeholders",
+    }
+
+    BLANK_FIELDS = {
+        "campaign_id",
+        "title",
+        "description",
+        "category",
+        "owner_id",
+        "period_start",
+        "period_end",
+    }
+
+    @staticmethod
+    def get_membership(*, workspace_id, user):
+        return DocumentPermission.get_membership(
+            workspace_id=workspace_id, user=user,
+        )
+
+    @staticmethod
+    def validate_fields(*, data, allowed_fields):
+        unknown_fields = set(data) - allowed_fields
+
+        if unknown_fields:
+            raise ValidationError({
+                field: "This field is not supported."
+                for field in sorted(unknown_fields)
+            })
+
+    @staticmethod
+    def get_campaign(*, workspace, campaign_id, lock=False):
+        campaign = DocumentSelector.get_campaign(
+            workspace=workspace,
+            campaign_id=campaign_id,
+            lock=lock,
+        )
+
+        if campaign is None:
+            raise NotFound("Campaign not found.")
+
+        return campaign
+
+    @staticmethod
+    def resolve_owner(*, membership, owner_id):
+        if owner_id is None or owner_id == membership.id:
+            return membership
+
+        DocumentPermission.require_management(membership=membership)
+
+        owner = DocumentSelector.get_eligible_owner(
+            workspace=membership.workspace,
+            owner_id=owner_id,
+        )
+
+        if owner is None:
+            raise ValidationError({
+                "owner_id": "Invalid document owner.",
+            })
+
+        return owner
+
+    @staticmethod
+    def save_document(*, document, update_fields=None):
+        validate_document_model(document)
+
+        if update_fields is None:
+            document.save()
+        else:
+            document.save(update_fields=update_fields)
+
+        return document
+
+    @classmethod
+    def get_document(
+        cls, *, membership, document_id,
+        include_archived=False, lock=False,
+    ):
+        document = DocumentSelector.get_by_id(
+            workspace=membership.workspace,
+            document_id=document_id,
+            include_archived=include_archived,
+            lock=lock,
+        )
+
+        if document is None:
+            raise NotFound("Document not found.")
+
+        return document
+
+    @classmethod
+    def get_list(cls, *, workspace_id, user, filters=None, campaign_id=None):
+        membership = cls.get_membership(
+            workspace_id=workspace_id, user=user,
+        )
+
+        filters = dict(filters or {})
+
+        if filters.get("is_archived"):
+            DocumentPermission.require_management(membership=membership)
+
+        if campaign_id is not None:
+            if filters.get("campaign_id") not in {None, campaign_id}:
+                raise ValidationError({
+                    "campaign_id": "Campaign filter does not match the URL.",
+                })
+
+            filters["campaign_id"] = campaign_id
+
+        if filters.get("campaign_id") is not None:
+            cls.get_campaign(
+                workspace=membership.workspace,
+                campaign_id=filters["campaign_id"],
+            )
+
+        queryset = DocumentSelector.get_documents(
+            workspace=membership.workspace,
+            filters=filters,
+        )
+
+        return queryset, membership
+
+    @classmethod
+    def get_details(cls, *, workspace_id, document_id, user):
+        membership = cls.get_membership(
+            workspace_id=workspace_id, user=user,
+        )
+
+        document = cls.get_document(
+            membership=membership,
+            document_id=document_id,
+            include_archived=DocumentPermission.is_management(
+                membership=membership,
+            ),
+        )
+
+        return document, membership
+
+    @classmethod
+    def prepare_generation(cls, *, membership, data, lock=False):
+        data = dict(data)
+
+        cls.validate_fields(
+            data=data,
+            allowed_fields=cls.GENERATION_FIELDS,
+        )
+
+        DocumentPermission.require_create(membership=membership)
+
+        missing_fields = {"campaign_id", "template_id"} - set(data)
+
+        if missing_fields:
+            raise ValidationError({
+                field: "This field is required."
+                for field in missing_fields
+            })
+
+        campaign = cls.get_campaign(
+            workspace=membership.workspace,
+            campaign_id=data["campaign_id"],
+            lock=lock,
+        )
+
+        version = DocumentSelector.get_published_version(
+            workspace=membership.workspace,
+            template_id=data["template_id"],
+            version_id=data.get("template_version_id"),
+            lock=lock,
+        )
+
+        if version is None:
+            raise NotFound("Published document template version not found.")
+
+        owner = cls.resolve_owner(
+            membership=membership,
+            owner_id=data.get("owner_id"),
+        )
+
+        generator = DocumentGenerator(
+            campaign=campaign,
+            populate_placeholders=data.get("populate_placeholders", True),
+        )
+
+        generated = generator.generate(structure=version.structure)
+
+        return {
+            "campaign": campaign,
+            "version": version,
+            "owner": owner,
+            "title": data.get("title") or version.name,
+            "description": data.get("description", version.description),
+            "category": version.category,
+            "period_start": data.get("period_start"),
+            "period_end": data.get("period_end"),
+            "generated": generated,
+        }
+
+    @staticmethod
+    def build_document(*, prepared, user):
+        return Document(
+            campaign=prepared["campaign"],
+            template_version=prepared.get("version"),
+            title=prepared["title"],
+            description=prepared["description"],
+            category=prepared["category"],
+            owner=prepared["owner"],
+            period_start=prepared.get("period_start"),
+            period_end=prepared.get("period_end"),
+            structure_snapshot=deepcopy(
+                prepared["generated"]["structure_snapshot"],
+            ),
+            content=deepcopy(prepared["generated"]["content"]),
+            status=DocumentStatus.DRAFT,
+            created_by=user,
+            updated_by=user,
+        )
+
+    @classmethod
+    def preview(cls, *, workspace_id, user, data):
+        membership = cls.get_membership(
+            workspace_id=workspace_id, user=user,
+        )
+
+        prepared = cls.prepare_generation(
+            membership=membership,
+            data=data,
+        )
+
+        document = cls.build_document(
+            prepared=prepared,
+            user=user,
+        )
+
+        validate_document_model(document)
+
+        version = prepared["version"]
+
+        return {
+            "workspace_id": str(membership.workspace_id),
+            "campaign_id": str(document.campaign_id),
+            "template_id": str(version.template_id),
+            "template_version_id": str(version.id),
+            "template_version": version.version,
+            "title": document.title,
+            "description": document.description,
+            "category": document.category,
+            "owner_id": str(document.owner_id),
+            "period_start": document.period_start,
+            "period_end": document.period_end,
+            "status": DocumentStatus.DRAFT,
+            **prepared["generated"],
+        }
+
+    @classmethod
+    @transaction.atomic
+    def generate(cls, *, workspace_id, user, data):
+        membership = cls.get_membership(
+            workspace_id=workspace_id, user=user,
+        )
+
+        prepared = cls.prepare_generation(
+            membership=membership,
+            data=data,
+            lock=True,
+        )
+
+        document = cls.build_document(
+            prepared=prepared,
+            user=user,
+        )
+
+        cls.save_document(document=document)
+
+        return document, membership
+
+    @classmethod
+    @transaction.atomic
+    def create_blank(cls, *, workspace_id, user, data):
+        membership = cls.get_membership(
+            workspace_id=workspace_id, user=user,
+        )
+
+        DocumentPermission.require_create(membership=membership)
+
+        data = dict(data)
+
+        cls.validate_fields(
+            data=data,
+            allowed_fields=cls.BLANK_FIELDS,
+        )
+
+        missing_fields = {"campaign_id", "title"} - set(data)
+
+        if missing_fields:
+            raise ValidationError({
+                field: "This field is required."
+                for field in missing_fields
+            })
+
+        campaign = cls.get_campaign(
+            workspace=membership.workspace,
+            campaign_id=data["campaign_id"],
+            lock=True,
+        )
+
+        owner = cls.resolve_owner(
+            membership=membership,
+            owner_id=data.get("owner_id"),
+        )
+
+        generator = DocumentGenerator(
+            campaign=campaign,
+            populate_placeholders=False,
+        )
+
+        generated = generator.generate(
+            structure=default_template_structure(),
+        )
+
+        document = cls.build_document(
+            prepared={
+                "campaign": campaign,
+                "version": None,
+                "owner": owner,
+                "title": data["title"],
+                "description": data.get("description", ""),
+                "category": data.get(
+                    "category", DocumentTemplateCategory.CUSTOM,
+                ),
+                "period_start": data.get("period_start"),
+                "period_end": data.get("period_end"),
+                "generated": generated,
+            },
+            user=user,
+        )
+
+        cls.save_document(document=document)
+
+        return document, membership
+
+    @classmethod
+    @transaction.atomic
+    def update_metadata(cls, *, workspace_id, document_id, user, data):
+        membership = cls.get_membership(
+            workspace_id=workspace_id, user=user,
+        )
+
+        document = cls.get_document(
+            membership=membership,
+            document_id=document_id,
+            lock=True,
+        )
+
+        DocumentPermission.require_edit(
+            membership=membership,
+            document=document,
+        )
+
+        data = dict(data)
+
+        cls.validate_fields(
+            data=data,
+            allowed_fields=cls.EDITABLE_METADATA_FIELDS,
+        )
+
+        if "owner_id" in data:
+            DocumentPermission.require_management(membership=membership)
+
+            owner = cls.resolve_owner(
+                membership=membership,
+                owner_id=data.pop("owner_id"),
+            )
+
+            data["owner"] = owner
+
+        changed_fields = []
+
+        for field, value in data.items():
+            if getattr(document, field) != value:
+                setattr(document, field, value)
+                changed_fields.append(field)
+
+        if changed_fields:
+            document.updated_by = user
+
+            cls.save_document(
+                document=document,
+                update_fields=[
+                    *changed_fields,
+                    "updated_by",
+                    "updated_at",
+                ],
+            )
+
+        return document, membership
+
+    @classmethod
+    @transaction.atomic
+    def duplicate(cls, *, workspace_id, document_id, user, data=None):
+        membership = cls.get_membership(
+            workspace_id=workspace_id, user=user,
+        )
+
+        DocumentPermission.require_create(membership=membership)
+
+        original = cls.get_document(
+            membership=membership,
+            document_id=document_id,
+            lock=True,
+        )
+
+        data = dict(data or {})
+
+        cls.validate_fields(
+            data=data,
+            allowed_fields={"title"},
+        )
+
+        document = Document(
+            campaign=original.campaign,
+            template_version=original.template_version,
+            title=data.get("title") or f"{original.title[:248]} (Copy)",
+            description=original.description,
+            category=original.category,
+            owner=membership,
+            structure_snapshot=deepcopy(original.structure_snapshot),
+            content=deepcopy(original.content),
+            period_start=original.period_start,
+            period_end=original.period_end,
+            status=DocumentStatus.DRAFT,
+            created_by=user,
+            updated_by=user,
+        )
+
+        cls.save_document(document=document)
+
+        return document, membership
+
+    @classmethod
+    @transaction.atomic
+    def change_status(cls, *, workspace_id, document_id, user, status):
+        membership = cls.get_membership(
+            workspace_id=workspace_id, user=user,
+        )
+
+        document = cls.get_document(
+            membership=membership,
+            document_id=document_id,
+            lock=True,
+        )
+
+        DocumentPermission.require_edit(
+            membership=membership,
+            document=document,
+        )
+
+        if status == document.status:
+            return document, membership
+
+        allowed = DOCUMENT_STATUS_TRANSITIONS.get(
+            document.status, set(),
+        )
+
+        if status not in allowed:
+            raise ValidationError({
+                "status": (
+                    f"Invalid transition from {document.status} to {status}."
+                ),
+            })
+
+        document.status = status
+        document.updated_by = user
+
+        cls.save_document(
+            document=document,
+            update_fields=["status", "updated_by", "updated_at"],
+        )
+
+        return document, membership
+
+    @classmethod
+    @transaction.atomic
+    def archive(cls, *, workspace_id, document_id, user):
+        membership = cls.get_membership(
+            workspace_id=workspace_id, user=user,
+        )
+
+        DocumentPermission.require_management(membership=membership)
+
+        document = cls.get_document(
+            membership=membership,
+            document_id=document_id,
+            include_archived=True,
+            lock=True,
+        )
+
+        if not document.is_archived:
+            document.is_archived = True
+            document.archived_at = timezone.now()
+            document.updated_by = user
+
+            cls.save_document(
+                document=document,
+                update_fields=[
+                    "is_archived",
+                    "archived_at",
+                    "updated_by",
+                    "updated_at",
+                ],
+            )
+
+        return document, membership
+
+    @classmethod
+    @transaction.atomic
+    def restore(cls, *, workspace_id, document_id, user):
+        membership = cls.get_membership(
+            workspace_id=workspace_id, user=user,
+        )
+
+        DocumentPermission.require_management(membership=membership)
+
+        document = cls.get_document(
+            membership=membership,
+            document_id=document_id,
+            include_archived=True,
+            lock=True,
+        )
+
+        if document.is_archived:
+            document.is_archived = False
+            document.archived_at = None
+            document.updated_by = user
+
+            cls.save_document(
+                document=document,
+                update_fields=[
+                    "is_archived",
+                    "archived_at",
+                    "updated_by",
+                    "updated_at",
+                ],
+            )
+
+        return document, membership

@@ -2,6 +2,9 @@ from rest_framework.exceptions import NotFound, PermissionDenied
 
 from campaignflow.organization.models import WorkspaceMember
 from campaignflow.organization.selectors import WorkspaceSelector
+from rest_framework.exceptions import PermissionDenied
+
+from campaignflow.organization.models import WorkspaceMember
 
 
 class TaskAttachmentPermission:
@@ -89,4 +92,85 @@ class DocumentTemplatePermission:
             "can_restore": is_management and not template.is_system and template.is_archived,
             "can_view_draft": is_management,
             "can_restore_version": can_edit,
+        }
+
+
+class DocumentPermission:
+
+    @staticmethod
+    def get_membership(*, workspace_id, user):
+        membership = DocumentTemplatePermission.get_membership(
+            workspace_id=workspace_id,
+            user=user,
+        )
+
+        DocumentPermission.require_view(membership=membership)
+
+        return membership
+
+    @staticmethod
+    def is_management(*, membership):
+        return membership.role in {
+            WorkspaceMember.Role.ADMIN,
+            WorkspaceMember.Role.MANAGER,
+        }
+
+    @staticmethod
+    def require_view(*, membership):
+        if membership.role == WorkspaceMember.Role.GUEST:
+            raise PermissionDenied("You cannot view workspace documents.")
+
+    @classmethod
+    def require_management(cls, *, membership):
+        if not cls.is_management(membership=membership):
+            raise PermissionDenied("You cannot manage workspace documents.")
+
+    @classmethod
+    def require_create(cls, *, membership):
+        cls.require_view(membership=membership)
+
+    @classmethod
+    def can_edit(cls, *, membership, document):
+        if document.is_archived or document.campaign.is_archived:
+            return False
+
+        if cls.is_management(membership=membership):
+            return True
+
+        return (
+            membership.role == WorkspaceMember.Role.MEMBER
+            and document.owner_id == membership.id
+        )
+
+    @classmethod
+    def require_edit(cls, *, membership, document):
+        if not cls.can_edit(membership=membership, document=document):
+            raise PermissionDenied("You cannot edit this document.")
+
+    @classmethod
+    def get_actions(cls, *, membership, document):
+        management = cls.is_management(membership=membership)
+        active_campaign = not document.campaign.is_archived
+
+        can_edit = cls.can_edit(
+            membership=membership,
+            document=document,
+        )
+
+        return {
+            "can_view": membership.role != WorkspaceMember.Role.GUEST,
+            "can_edit": can_edit,
+            "can_change_status": can_edit,
+            "can_duplicate": (
+                active_campaign
+                and not document.is_archived
+                and membership.role != WorkspaceMember.Role.GUEST
+            ),
+            "can_change_owner": management and can_edit,
+            "can_archive": (
+                management and active_campaign and not document.is_archived
+            ),
+            "can_restore": (
+                management and active_campaign and document.is_archived
+            ),
         }
