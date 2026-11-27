@@ -19,6 +19,7 @@ from .tasks import send_workspace_invitation_email
 from .validators import validate_time_off_dates
 from .workload import WorkloadCalculator
 from ..campaigns.models import Campaign
+from ..documents.services import DocumentTemplateDefaultsService
 from ..optimizer.selectors import OptimizerSelector
 from ..tasks.selectors import TaskWorkloadSelector
 
@@ -107,7 +108,7 @@ def workspace_create(*, created_by, name: str, **extra_fields) -> Workspace:
     member = WorkspaceMember(workspace=workspace, user=created_by, role=WorkspaceMember.Role.ADMIN)
     member.full_clean()
     member.save()
-
+    DocumentTemplateDefaultsService.initialize_workspace(workspace=workspace,)
     return workspace
 
 
@@ -672,3 +673,4 @@ class WorkspaceWorkloadService:
             "timezone": result["timezone"],
             "member": result["members"][0],
         }
+
