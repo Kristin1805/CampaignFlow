@@ -24,6 +24,26 @@ from campaignflow.documents.enums import (
     DocumentFieldType,
     DocumentTemplateStatus,
 )
+
+from rest_framework import status
+from rest_framework.response import Response
+
+from campaignflow.documents.pagination import DocumentPagination
+from campaignflow.documents.services import DocumentService
+
+from campaignflow.documents.serializers import (
+    DocumentGenerateSerializer,
+    DocumentBlankSerializer,
+    DocumentMetadataSerializer,
+    DocumentDuplicateSerializer,
+    DocumentStatusSerializer,
+    DocumentEmptySerializer,
+    DocumentListFilterSerializer,
+    DocumentListOutputSerializer,
+    DocumentOutputSerializer,
+    DocumentGenerationPreviewSerializer,
+)
+
 from campaignflow.documents.pagination import DocumentTemplatePagination
 from campaignflow.documents.placeholders import DocumentPlaceholderRegistry
 from campaignflow.documents.serializers import (
@@ -372,3 +392,212 @@ class DocumentTemplateSchemaApi(PrivateApi):
                 "max_structure_bytes": MAX_TEMPLATE_STRUCTURE_BYTES,
             },
         })
+
+class DocumentBaseApi(PrivateApi):
+
+    @staticmethod
+    def document_response(*, document, membership, status_code=status.HTTP_200_OK):
+        serializer = DocumentOutputSerializer(
+            document,
+            context={"membership": membership},
+        )
+
+        return Response(serializer.data, status=status_code)
+
+
+class DocumentListApi(DocumentBaseApi):
+
+    def get(self, request, workspace_id, campaign_id=None):
+        serializer = DocumentListFilterSerializer(
+            data=request.query_params.dict(),
+        )
+        serializer.is_valid(raise_exception=True)
+
+        queryset, membership = DocumentService.get_list(
+            workspace_id=workspace_id,
+            campaign_id=campaign_id,
+            user=request.user,
+            filters=serializer.validated_data,
+        )
+
+        queryset = queryset.defer(
+            "content",
+            "structure_snapshot",
+            "template_version__structure",
+            "template_version__template__draft_structure",
+        )
+
+        paginator = DocumentPagination()
+        page = paginator.paginate_queryset(queryset, request, view=self)
+
+        output = DocumentListOutputSerializer(
+            page,
+            many=True,
+            context={"membership": membership},
+        )
+
+        return paginator.get_paginated_response(output.data)
+
+
+class DocumentDetailsApi(DocumentBaseApi):
+
+    def get(self, request, workspace_id, document_id):
+        document, membership = DocumentService.get_details(
+            workspace_id=workspace_id,
+            document_id=document_id,
+            user=request.user,
+        )
+
+        return self.document_response(
+            document=document,
+            membership=membership,
+        )
+
+    def patch(self, request, workspace_id, document_id):
+        serializer = DocumentMetadataSerializer(
+            data=request.data,
+            partial=True,
+        )
+        serializer.is_valid(raise_exception=True)
+
+        document, membership = DocumentService.update_metadata(
+            workspace_id=workspace_id,
+            document_id=document_id,
+            user=request.user,
+            data=serializer.validated_data,
+        )
+
+        return self.document_response(
+            document=document,
+            membership=membership,
+        )
+
+
+class DocumentGenerateApi(DocumentBaseApi):
+
+    def post(self, request, workspace_id):
+        serializer = DocumentGenerateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        document, membership = DocumentService.generate(
+            workspace_id=workspace_id,
+            user=request.user,
+            data=serializer.validated_data,
+        )
+
+        return self.document_response(
+            document=document,
+            membership=membership,
+            status_code=status.HTTP_201_CREATED,
+        )
+
+
+class DocumentGenerationPreviewApi(DocumentBaseApi):
+
+    def post(self, request, workspace_id):
+        serializer = DocumentGenerateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        preview = DocumentService.preview(
+            workspace_id=workspace_id,
+            user=request.user,
+            data=serializer.validated_data,
+        )
+
+        output = DocumentGenerationPreviewSerializer(preview)
+
+        return Response(output.data)
+
+
+class DocumentBlankApi(DocumentBaseApi):
+
+    def post(self, request, workspace_id):
+        serializer = DocumentBlankSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        document, membership = DocumentService.create_blank(
+            workspace_id=workspace_id,
+            user=request.user,
+            data=serializer.validated_data,
+        )
+
+        return self.document_response(
+            document=document,
+            membership=membership,
+            status_code=status.HTTP_201_CREATED,
+        )
+
+
+class DocumentDuplicateApi(DocumentBaseApi):
+
+    def post(self, request, workspace_id, document_id):
+        serializer = DocumentDuplicateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        document, membership = DocumentService.duplicate(
+            workspace_id=workspace_id,
+            document_id=document_id,
+            user=request.user,
+            data=serializer.validated_data,
+        )
+
+        return self.document_response(
+            document=document,
+            membership=membership,
+            status_code=status.HTTP_201_CREATED,
+        )
+
+
+class DocumentStatusApi(DocumentBaseApi):
+
+    def post(self, request, workspace_id, document_id):
+        serializer = DocumentStatusSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        document, membership = DocumentService.change_status(
+            workspace_id=workspace_id,
+            document_id=document_id,
+            user=request.user,
+            status=serializer.validated_data["status"],
+        )
+
+        return self.document_response(
+            document=document,
+            membership=membership,
+        )
+
+
+class DocumentArchiveApi(DocumentBaseApi):
+
+    def post(self, request, workspace_id, document_id):
+        serializer = DocumentEmptySerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        document, membership = DocumentService.archive(
+            workspace_id=workspace_id,
+            document_id=document_id,
+            user=request.user,
+        )
+
+        return self.document_response(
+            document=document,
+            membership=membership,
+        )
+
+
+class DocumentRestoreApi(DocumentBaseApi):
+
+    def post(self, request, workspace_id, document_id):
+        serializer = DocumentEmptySerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        document, membership = DocumentService.restore(
+            workspace_id=workspace_id,
+            document_id=document_id,
+            user=request.user,
+        )
+
+        return self.document_response(
+            document=document,
+            membership=membership,
+        )

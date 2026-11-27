@@ -266,3 +266,318 @@ class DocumentTemplateDetailsSerializer(DocumentTemplateListSerializer):
             version.description != obj.description,
             version.category != obj.category,
         ])
+
+from rest_framework import serializers
+
+from campaignflow.documents.enums import DocumentStatus, DocumentTemplateCategory
+from campaignflow.documents.models import Document
+from campaignflow.documents.permissions import DocumentPermission
+from campaignflow.documents.selectors import DocumentSelector
+
+
+class DocumentStrictSerializer(serializers.Serializer):
+
+    def to_internal_value(self, data):
+        if not isinstance(data, dict):
+            raise serializers.ValidationError("Expected an object.")
+
+        unknown_fields = set(data) - set(self.fields)
+
+        if unknown_fields:
+            raise serializers.ValidationError({
+                field: "Unknown field."
+                for field in sorted(unknown_fields)
+            })
+
+        return super().to_internal_value(data)
+
+
+class DocumentPeriodSerializer(DocumentStrictSerializer):
+
+    period_start = serializers.DateField(
+        required=False, allow_null=True,
+    )
+
+    period_end = serializers.DateField(
+        required=False, allow_null=True,
+    )
+
+    def validate(self, attrs):
+        start = attrs.get("period_start")
+        end = attrs.get("period_end")
+
+        if not self.partial and bool(start) != bool(end):
+            raise serializers.ValidationError({
+                "period_end": "Both reporting period dates are required.",
+            })
+
+        if start and end and start > end:
+            raise serializers.ValidationError({
+                "period_end": "End date cannot be before start date.",
+            })
+
+        return attrs
+
+
+class DocumentGenerateSerializer(DocumentPeriodSerializer):
+
+    campaign_id = serializers.UUIDField()
+    template_id = serializers.UUIDField()
+
+    template_version_id = serializers.UUIDField(
+        required=False, allow_null=True,
+    )
+
+    title = serializers.CharField(
+        max_length=255, required=False,
+    )
+
+    description = serializers.CharField(
+        max_length=20000, required=False, allow_blank=True,
+    )
+
+    owner_id = serializers.UUIDField(
+        required=False, allow_null=True,
+    )
+
+    populate_placeholders = serializers.BooleanField(default=True)
+
+
+class DocumentBlankSerializer(DocumentPeriodSerializer):
+
+    campaign_id = serializers.UUIDField()
+    title = serializers.CharField(max_length=255)
+
+    description = serializers.CharField(
+        max_length=20000, required=False, allow_blank=True,
+    )
+
+    category = serializers.ChoiceField(
+        choices=DocumentTemplateCategory.choices,
+        default=DocumentTemplateCategory.CUSTOM,
+    )
+
+    owner_id = serializers.UUIDField(
+        required=False, allow_null=True,
+    )
+
+
+class DocumentMetadataSerializer(DocumentPeriodSerializer):
+
+    title = serializers.CharField(
+        max_length=255, required=False,
+    )
+
+    description = serializers.CharField(
+        max_length=20000, required=False, allow_blank=True,
+    )
+
+    category = serializers.ChoiceField(
+        choices=DocumentTemplateCategory.choices,
+        required=False,
+    )
+
+    owner_id = serializers.UUIDField(required=False)
+
+
+class DocumentDuplicateSerializer(DocumentStrictSerializer):
+
+    title = serializers.CharField(
+        max_length=255, required=False,
+    )
+
+
+class DocumentStatusSerializer(DocumentStrictSerializer):
+
+    status = serializers.ChoiceField(
+        choices=DocumentStatus.choices,
+    )
+
+
+class DocumentEmptySerializer(DocumentStrictSerializer):
+    pass
+
+
+class DocumentListFilterSerializer(DocumentStrictSerializer):
+
+    campaign_id = serializers.UUIDField(required=False)
+    template_id = serializers.UUIDField(required=False)
+    owner_id = serializers.UUIDField(required=False)
+
+    category = serializers.ChoiceField(
+        choices=DocumentTemplateCategory.choices,
+        required=False,
+    )
+
+    status = serializers.ChoiceField(
+        choices=DocumentStatus.choices,
+        required=False,
+    )
+
+    period_start = serializers.DateField(required=False)
+    period_end = serializers.DateField(required=False)
+
+    created_from = serializers.DateField(required=False)
+    created_to = serializers.DateField(required=False)
+
+    search = serializers.CharField(
+        max_length=255, required=False, allow_blank=True,
+    )
+
+    is_archived = serializers.BooleanField(default=False)
+
+    ordering = serializers.ChoiceField(
+        choices=sorted(DocumentSelector.ORDERING_FIELDS),
+        default="-created_at",
+    )
+
+    page = serializers.IntegerField(
+        min_value=1, required=False,
+    )
+
+    page_size = serializers.IntegerField(
+        min_value=1, max_value=100, required=False,
+    )
+
+    def validate(self, attrs):
+        periods = [
+            ("period_start", "period_end"),
+            ("created_from", "created_to"),
+        ]
+
+        for start_field, end_field in periods:
+            start = attrs.get(start_field)
+            end = attrs.get(end_field)
+
+            if start and end and start > end:
+                raise serializers.ValidationError({
+                    end_field: "End date cannot be before start date.",
+                })
+
+        return attrs
+
+
+class DocumentUserSerializer(serializers.Serializer):
+
+    id = serializers.ReadOnlyField()
+    email = serializers.EmailField(read_only=True)
+
+
+class DocumentOwnerSerializer(serializers.Serializer):
+
+    id = serializers.UUIDField(read_only=True)
+    role = serializers.CharField(read_only=True)
+    user = DocumentUserSerializer(read_only=True)
+
+
+class DocumentTemplateReferenceSerializer(serializers.Serializer):
+
+    id = serializers.UUIDField(read_only=True)
+    template_id = serializers.UUIDField(read_only=True)
+    version = serializers.IntegerField(read_only=True)
+    name = serializers.CharField(read_only=True)
+    category = serializers.CharField(read_only=True)
+    published_at = serializers.DateTimeField(read_only=True)
+
+
+class DocumentListOutputSerializer(serializers.ModelSerializer):
+
+    workspace_id = serializers.UUIDField(
+        source="campaign.workspace_id", read_only=True,
+    )
+
+    campaign_id = serializers.UUIDField(read_only=True)
+
+    campaign_name = serializers.CharField(
+        source="campaign.name", read_only=True,
+    )
+
+    template_version = DocumentTemplateReferenceSerializer(
+        read_only=True,
+    )
+
+    owner = DocumentOwnerSerializer(read_only=True)
+    created_by = DocumentUserSerializer(read_only=True)
+    updated_by = DocumentUserSerializer(read_only=True)
+
+    actions = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Document
+
+        fields = [
+            "id",
+            "workspace_id",
+            "campaign_id",
+            "campaign_name",
+            "template_version",
+            "title",
+            "description",
+            "category",
+            "owner",
+            "status",
+            "period_start",
+            "period_end",
+            "created_by",
+            "updated_by",
+            "is_archived",
+            "archived_at",
+            "created_at",
+            "updated_at",
+            "actions",
+        ]
+
+    def get_actions(self, obj):
+        return DocumentPermission.get_actions(
+            membership=self.context["membership"],
+            document=obj,
+        )
+
+
+class DocumentOutputSerializer(DocumentListOutputSerializer):
+
+    class Meta(DocumentListOutputSerializer.Meta):
+
+        fields = [
+            *DocumentListOutputSerializer.Meta.fields,
+            "structure_snapshot",
+            "content",
+        ]
+
+
+class DocumentGenerationPreviewSerializer(serializers.Serializer):
+
+    workspace_id = serializers.UUIDField()
+    campaign_id = serializers.UUIDField()
+    template_id = serializers.UUIDField()
+    template_version_id = serializers.UUIDField()
+    template_version = serializers.IntegerField()
+
+    title = serializers.CharField()
+    description = serializers.CharField(allow_blank=True)
+    category = serializers.CharField()
+    owner_id = serializers.UUIDField()
+
+    period_start = serializers.DateField(allow_null=True)
+    period_end = serializers.DateField(allow_null=True)
+
+    status = serializers.CharField()
+
+    structure_snapshot = serializers.JSONField()
+    content = serializers.JSONField()
+
+    resolved_placeholders = serializers.ListField(
+        child=serializers.CharField(),
+    )
+
+    unresolved_placeholders = serializers.ListField(
+        child=serializers.CharField(),
+    )
+
+    empty_fields = serializers.ListField(
+        child=serializers.DictField(),
+    )
+
+    warnings = serializers.ListField(
+        child=serializers.DictField(),
+    )

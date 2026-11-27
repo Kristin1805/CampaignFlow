@@ -5,8 +5,13 @@ from rest_framework.exceptions import NotFound
 
 from campaignflow.documents.constants import TEMPLATE_ORDERING_FIELDS
 from campaignflow.documents.enums import DocumentTemplateStatus
-from campaignflow.documents.models import DocumentTemplate, DocumentTemplateVersion
-
+from campaignflow.campaigns.models import Campaign
+from campaignflow.documents.models import (
+    Document,
+    DocumentTemplate,
+    DocumentTemplateVersion,
+)
+from campaignflow.organization.models import WorkspaceMember
 
 
 class TaskAttachmentSelector:
@@ -124,3 +129,150 @@ class DocumentTemplateSelector:
         return DocumentTemplateVersion.objects.filter(
             template=template, version=template.latest_version,
         ).select_related("published_by").first()
+
+
+class DocumentSelector:
+
+    ORDERING_FIELDS = {
+        "title", "-title",
+        "created_at", "-created_at",
+        "updated_at", "-updated_at",
+        "status", "-status",
+        "category", "-category",
+    }
+
+    @staticmethod
+    def get_campaign(*, workspace, campaign_id, lock=False):
+        queryset = Campaign.objects.filter(
+            id=campaign_id,
+            workspace=workspace,
+            is_archived=False,
+        )
+
+        if lock:
+            queryset = queryset.select_for_update()
+
+        return queryset.select_related("workspace").first()
+
+    @staticmethod
+    def get_base_queryset(*, workspace):
+        return Document.objects.filter(
+            campaign__workspace=workspace,
+            campaign__is_archived=False,
+        ).select_related(
+            "campaign",
+            "campaign__workspace",
+            "template_version",
+            "template_version__template",
+            "owner",
+            "owner__user",
+            "created_by",
+            "updated_by",
+        )
+
+    @classmethod
+    def get_by_id(cls, *, workspace, document_id, include_archived=False, lock=False):
+        queryset = cls.get_base_queryset(workspace=workspace).filter(
+            id=document_id,
+        )
+
+        if not include_archived:
+            queryset = queryset.filter(is_archived=False)
+
+        if lock:
+            queryset = queryset.select_for_update(of=("self",))
+
+        return queryset.first()
+
+    @classmethod
+    def get_documents(cls, *, workspace, filters=None):
+        filters = filters or {}
+
+        queryset = cls.get_base_queryset(workspace=workspace).filter(
+            is_archived=filters.get("is_archived", False),
+        )
+
+        filter_fields = {
+            "campaign_id": "campaign_id",
+            "template_id": "template_version__template_id",
+            "category": "category",
+            "status": "status",
+            "owner_id": "owner_id",
+        }
+
+        for key, field in filter_fields.items():
+            if filters.get(key) is not None:
+                queryset = queryset.filter(**{field: filters[key]})
+
+        if filters.get("search"):
+            search = filters["search"]
+
+            queryset = queryset.filter(
+                Q(title__icontains=search)
+                | Q(description__icontains=search)
+            )
+
+        if filters.get("period_start"):
+            queryset = queryset.filter(
+                period_end__gte=filters["period_start"],
+            )
+
+        if filters.get("period_end"):
+            queryset = queryset.filter(
+                period_start__lte=filters["period_end"],
+            )
+
+        if filters.get("created_from"):
+            queryset = queryset.filter(
+                created_at__date__gte=filters["created_from"],
+            )
+
+        if filters.get("created_to"):
+            queryset = queryset.filter(
+                created_at__date__lte=filters["created_to"],
+            )
+
+        ordering = filters.get("ordering", "-created_at")
+
+        if ordering not in cls.ORDERING_FIELDS:
+            ordering = "-created_at"
+
+        return queryset.order_by(ordering, "id")
+
+    @staticmethod
+    def get_published_version(
+        *, workspace, template_id, version_id=None, lock=False,
+    ):
+        templates = DocumentTemplate.objects.filter(
+            id=template_id,
+            workspace=workspace,
+            is_archived=False,
+            latest_version__gt=0,
+        )
+
+        if lock:
+            templates = templates.select_for_update()
+
+        template = templates.first()
+
+        if template is None:
+            return None
+
+        versions = DocumentTemplateVersion.objects.filter(
+            template=template,
+        ).select_related("template")
+
+        if version_id is not None:
+            return versions.filter(id=version_id).first()
+
+        return versions.filter(version=template.latest_version).first()
+
+    @staticmethod
+    def get_eligible_owner(*, workspace, owner_id):
+        return WorkspaceMember.objects.filter(
+            id=owner_id,
+            workspace=workspace,
+            user__is_active=True,
+        ).exclude(
+            role=WorkspaceMember.Role.GUEST,
+        ).select_related("user").first()
