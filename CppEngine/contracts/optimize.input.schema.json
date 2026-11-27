@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "cf_engine optimize input v1",
+  "description": "Cross-field rules checked by cf_engine itself (exit 3): task ids are unique, every depends_on.task_id exists in tasks, deadline > now. Cycles are exit 2. Django does not send completed/cancelled tasks; priority low/medium/high/urgent is mapped to 1..4 by Django. skill = null means anyone can do the task.",
+  "type": "object",
+  "required": ["campaign_id", "now", "deadline", "calendar", "tasks", "people"],
+  "properties": {
+    "campaign_id": { "type": "string", "format": "uuid" },
+    "now":         { "type": "string", "format": "date-time" },
+    "deadline":    { "type": "string", "format": "date-time" },
+
+    "calendar": {
+      "type": "object",
+      "required": ["hours_per_day", "work_days"],
+      "properties": {
+        "hours_per_day": { "type": "number", "exclusiveMinimum": 0, "maximum": 24 },
+        "day_start":     { "type": "string", "pattern": "^[0-2][0-9]:[0-5][0-9]$", "default": "09:00" },
+        "work_days": {
+          "description": "0 = Monday ... 6 = Sunday (same as Django Workspace.working_days)",
+          "type": "array",
+          "items": { "type": "integer", "minimum": 0, "maximum": 6 },
+          "uniqueItems": true
+        }
+      }
+    },
+
+    "tasks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "title", "estimate_h", "priority", "depends_on"],
+        "properties": {
+          "id":              { "type": "string", "format": "uuid" },
+          "title":           { "type": "string" },
+          "skill":           { "type": ["string", "null"] },
+          "estimate_h":      { "type": "number", "minimum": 0 },
+          "calibration":     { "type": "number", "exclusiveMinimum": 0, "default": 1.0 },
+          "remaining_ratio": { "type": "number", "minimum": 0, "maximum": 1, "default": 1.0 },
+          "priority":        { "type": "integer", "minimum": 1, "maximum": 4 },
+          "assignee_id":     { "type": ["string", "null"], "format": "uuid" },
+          "locked_assignee": { "type": "boolean", "default": false },
+          "due":             { "type": ["string", "null"], "format": "date-time" },
+          "depends_on": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["task_id", "lag_h"],
+              "properties": {
+                "task_id": { "type": "string", "format": "uuid" },
+                "lag_h":   { "type": "number", "minimum": 0 }
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "people": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "skills", "capacity_h_per_day"],
+        "properties": {
+          "id":                 { "type": "string", "format": "uuid" },
+          "name":               { "type": "string" },
+          "skills":             { "type": "array", "items": { "type": "string" } },
+          "capacity_h_per_day": { "type": "number", "minimum": 0, "maximum": 24 },
+          "busy_h":             { "type": "number", "minimum": 0, "default": 0 },
+          "absences": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["start_date", "end_date"],
+              "properties": {
+                "start_date": { "type": "string", "format": "date" },
+                "end_date":   { "type": "string", "format": "date" }
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "options": {
+      "type": "object",
+      "properties": {
+        "reassign": { "type": "boolean", "default": true },
+        "weights": {
+          "type": "object",
+          "properties": {
+            "slack":       { "type": "number", "minimum": 0, "default": 50 },
+            "descendants": { "type": "number", "minimum": 0, "default": 30 },
+            "priority":    { "type": "number", "minimum": 0, "default": 20 }
+          }
+        }
+      }
+    }
+  }
+}
